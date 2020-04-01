@@ -7,11 +7,10 @@ if __name__ == "__main__":
     for x in range(1000):
         gameState = GameState(4)
         while gameState.phase != GamePhase.GAME_OVER:
-            seatToAct = gameState.getSeatToAct()
-            playerToAct = gameState.playerStates[seatToAct].playerId
-            possible_actions = gameState.getPossibleActions(playerToAct)
+            seatToAct = gameState.get_players_to_act()[0]
+            possible_actions = gameState.getPossibleActions(seatToAct)
             gameState.print()
-            if seatToAct == 0:
+            if False and seatToAct == 0:
                 print("Possible Actions: " + str(possible_actions))
                 action = input(
                     "Please give an action for seat " + str(seatToAct) + ": "
@@ -19,4 +18,9 @@ if __name__ == "__main__":
                 action = int(action)
             else:
                 action = random.choice(possible_actions)
-            gameState.playerAction(playerToAct, action)
+            gameState.playerAction(seatToAct, action)
+        for i, player in enumerate(gameState.playerStates):
+            playerScore = player.getScore()
+            print(
+                "Player", i, "has a score: ", playerScore,
+            )

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
+import copy
 import random
 from enum import IntEnum
 from typing import Dict, List, Tuple
 from uuid import UUID, uuid4
+
+import torch
 
 from engine.player import PlayerState
 
@@ -14,46 +17,92 @@ class GamePhase(IntEnum):
     GAME_OVER = 3
 
 
+class GameInterface:
+    def action_dim(self):
+        raise NotImplementedError()
+
+
 class GameState:
-    def __init__(self, numPlayers: int):
+    __slots__ = [
+        "propertyCardsToDraw",
+        "dollarCardsToDraw",
+        "playerStates",
+        "biddingPlayer",
+        "highestBid",
+        "num_players",
+        "phase",
+        "onPropertyCard",
+        "onDollarCard",
+    ]
+
+    def __init__(self, num_players: int):
         self.propertyCardsToDraw = list(range(1, 31))
         self.dollarCardsToDraw = [0, 0] + (list(range(2, 16)) * 2)
-        self.playerStates = []
-        self.playerIdSeat: Dict[UUID, int] = {}
         self.biddingPlayer = 0
         self.highestBid = -1
-        self.numPlayers = numPlayers
-        assert numPlayers <= 4 and numPlayers > 0
+        self.num_players = num_players
+        assert num_players <= 4 and num_players > 0
 
-        for x in range(self.numPlayers):
-            playerState = PlayerState(uuid4())
-            self.playerStates.append(playerState)
-            self.playerIdSeat[playerState.playerId] = x
-
-        random.shuffle(self.propertyCardsToDraw)
-        random.shuffle(self.dollarCardsToDraw)
-
-        if self.numPlayers == 3:
-            self.propertyCardsToDraw = self.propertyCardsToDraw[:-6]
-            self.dollarCardsToDraw = self.dollarCardsToDraw[:-6]
-        elif self.numPlayers == 4:
-            self.propertyCardsToDraw = self.propertyCardsToDraw[:-2]
-            self.dollarCardsToDraw = self.dollarCardsToDraw[:-2]
-
-        for startSort in range(0, len(self.propertyCardsToDraw), self.numPlayers):
-            self.propertyCardsToDraw[startSort : startSort + self.numPlayers] = sorted(
-                self.propertyCardsToDraw[startSort : startSort + self.numPlayers],
-            )
-            self.dollarCardsToDraw[startSort : startSort + self.numPlayers] = sorted(
-                self.dollarCardsToDraw[startSort : startSort + self.numPlayers],
-                reverse=True,
-            )
+        playerStates = []
+        for x in range(self.num_players):
+            playerState = PlayerState()
+            playerStates.append(playerState)
+        self.playerStates = tuple(playerStates)
 
         self.phase = GamePhase.BUYING_HOUSES
 
+        self.reset()
+
+    def __hash__(self):
+        items_to_hash = [self.phase]
+        if self.phase == GamePhase.BUYING_HOUSES:
+            for p in self.playerStates:
+                items_to_hash.append(p.money)
+                items_to_hash.append(p.canBid)
+                items_to_hash.append(p.moneyBid)
+                items_to_hash.append(tuple(p.propertyCards))
+        elif self.phase == GamePhase.SELLING_HOUSES:
+            for p in self.playerStates:
+                items_to_hash.append(p.money)
+                items_to_hash.append(p.propertyBid)
+                items_to_hash.append(tuple(p.propertyCards))
+                items_to_hash.append(tuple(p.dollarCards))
+        else:
+            raise NotImplementedError()
+        return hash(tuple(items_to_hash))
+
+    def clone(self):
+        cloned_game = copy.copy(self)
+        cloned_game.playerStates = []
+        for ps in self.playerStates:
+            cloned_game.playerStates.append(copy.deepcopy(ps))
+        return cloned_game
+
+    def reset(self):
+        random.shuffle(self.propertyCardsToDraw)
+        random.shuffle(self.dollarCardsToDraw)
+
+        if self.num_players == 3:
+            self.onPropertyCard = 6
+            self.onDollarCard = 6
+        elif self.num_players == 4:
+            self.onPropertyCard = 2
+            self.onDollarCard = 2
+
+        for startSort in range(
+            self.onPropertyCard, len(self.propertyCardsToDraw), self.num_players
+        ):
+            self.propertyCardsToDraw[startSort : startSort + self.num_players] = sorted(
+                self.propertyCardsToDraw[startSort : startSort + self.num_players],
+            )
+            self.dollarCardsToDraw[startSort : startSort + self.num_players] = sorted(
+                self.dollarCardsToDraw[startSort : startSort + self.num_players],
+                reverse=True,
+            )
+
     def print(self):
-        for player in self.playerStates:
-            player.print()
+        for seat, player in enumerate(self.playerStates):
+            player.print(seat)
         if self.phase == GamePhase.BUYING_HOUSES:
             print("Houses on auction: " + str(self.getPropertyOnAuction()))
             for i, player in enumerate(self.playerStates):
@@ -63,13 +112,90 @@ class GameState:
             for i, player in enumerate(self.playerStates):
                 print("Player", i, "bid", player.propertyBid)
 
+    def action_dim(self):
+        return 1 + 19 + 30  # fold, bet 0-18, bet 1-30 properties
+
+    def terminal(self):
+        return self.phase == GamePhase.GAME_OVER
+
+    def payoff(self, player: int):
+        return float(self.playerStates[player].getScore()[0])
+
+    def get_one_hot_actions(self, hacks=True):
+        player = self.playerStates[self.get_player_to_act()]
+        actions = self.getPossibleActions(self.get_player_to_act())
+        actions_one_hot = torch.zeros((self.action_dim(),), dtype=torch.int)
+        if self.phase == GamePhase.BUYING_HOUSES and player.moneyBid > 0 and hacks:
+            # HACK: Let's fold after 1 round of bidding to speed up training
+            actions_one_hot[0] = 1
+        else:
+            for a in actions:
+                if self.phase == GamePhase.BUYING_HOUSES:
+                    # HACK: Do not ever bid more than 6
+                    if a <= 6 or hacks == False:
+                        actions_one_hot[1 + a] = 1
+                elif self.phase == GamePhase.SELLING_HOUSES:
+                    actions_one_hot[20 + (a - 1)] = 1
+                else:
+                    assert False, "Oops"
+        return actions_one_hot
+
+    def feature_dim(self):
+        return 77
+
+    def populate_features(self, features: torch.Tensor):
+        player = self.playerStates[self.get_player_to_act()]
+        cursor = 0
+        if self.phase == GamePhase.BUYING_HOUSES:
+            features[cursor] = player.money
+            cursor += 1
+            t = torch.tensor(self.getPropertyOnAuction())
+            features[cursor + (t - 1)] = 1.0
+            cursor += 30
+        else:
+            cursor += 31
+        if self.phase == GamePhase.SELLING_HOUSES:
+            for d in self.getDollarsOnAuction():
+                # d==1 is not possible but just let it be 0
+                features[cursor + d] += 1.0
+            cursor += 16
+            t = torch.tensor(player.propertyCards)
+            features[cursor + (t - 1)] = 1.0
+            cursor += 30
+
+        return features
+
+    def get_player_to_act(self):
+        if self.phase == GamePhase.BUYING_HOUSES:
+            return self.biddingPlayer
+        elif self.phase == GamePhase.SELLING_HOUSES:
+            for i, player in enumerate(self.playerStates):
+                if player.propertyBid == 0:
+                    return i
+        else:
+            assert False, "Oops"
+        assert False, "Should never get here"
+
+    def act(self, player: int, action_index: int):
+        assert player == self.get_player_to_act()
+        if self.phase == GamePhase.BUYING_HOUSES:
+            self.playerAction(player, action_index - 1)
+        elif self.phase == GamePhase.SELLING_HOUSES:
+            self.playerAction(player, (action_index - 20) + 1)
+        else:
+            assert False, "Oops"
+
     def getPropertyOnAuction(self):
         assert self.phase == GamePhase.BUYING_HOUSES
-        return self.propertyCardsToDraw[0 : self.numBiddersLeft()]
+        return self.propertyCardsToDraw[
+            self.onPropertyCard : self.onPropertyCard + self.numBiddersLeft()
+        ]
 
     def getDollarsOnAuction(self):
         assert self.phase == GamePhase.SELLING_HOUSES
-        return self.dollarCardsToDraw[0 : self.numPlayers]
+        return self.dollarCardsToDraw[
+            self.onDollarCard : self.onDollarCard + self.num_players
+        ]
 
     def getPlayerSeatWithLargestHouse(self):
         bestSeat = -1
@@ -85,24 +211,32 @@ class GameState:
                     bestHouse = newBestHouse
         return bestSeat
 
-    def getSeatToAct(self):
+    def get_players_to_act(self):
         if self.phase == GamePhase.BUYING_HOUSES:
-            return self.biddingPlayer
+            return [self.biddingPlayer]
         elif self.phase == GamePhase.SELLING_HOUSES:
+            bids_needed = []
             for i, player in enumerate(self.playerStates):
                 if player.propertyBid == 0:
-                    return i
-            assert False, "Should never get here"
+                    bids_needed.append(i)
+            assert len(bids_needed) > 0, "Should never get here"
+            return bids_needed
         else:
             assert False, "Oops"
 
-    def getPossibleActions(self, playerId: UUID):
-        seat = self.playerIdSeat[playerId]
+    def getPossibleActions(self, seat: int):
         if self.phase == GamePhase.BUYING_HOUSES:
             assert seat == self.biddingPlayer
-            return [-1] + list(
-                range(self.highestBid + 1, self.playerStates[seat].money + 1)
-            )
+            assert self.playerStates[seat].canBid
+            if self.highestBid == -1:
+                # Can't fold if there are no bids
+                return list(
+                    range(self.highestBid + 1, self.playerStates[seat].money + 1)
+                )
+            else:
+                return [-1] + list(
+                    range(self.highestBid + 1, self.playerStates[seat].money + 1)
+                )
         elif self.phase == GamePhase.SELLING_HOUSES:
             assert self.playerStates[seat].propertyBid == 0
             return list(self.playerStates[seat].propertyCards)
@@ -117,15 +251,15 @@ class GameState:
         assert biddersLeft > 0
         return biddersLeft
 
-    def playerAction(self, playerId: UUID, action: int) -> None:
+    def playerAction(self, seat: int, action: int) -> None:
         if self.phase == GamePhase.BUYING_HOUSES:
+            assert seat == self.biddingPlayer
             biddingPlayer = self.playerStates[self.biddingPlayer]
-            assert playerId == biddingPlayer.playerId
             assert biddingPlayer.canBid
             if action == -1:
                 # Fold
-                boughtProperty = self.propertyCardsToDraw[0]
-                del self.propertyCardsToDraw[0]
+                boughtProperty = self.propertyCardsToDraw[self.onPropertyCard]
+                self.onPropertyCard += 1
                 biddingPlayer.propertyCards.append(boughtProperty)
                 biddingPlayer.money += biddingPlayer.moneyBid // 2
                 biddingPlayer.moneyBid = 0
@@ -135,11 +269,13 @@ class GameState:
                 if biddersLeft == 1:
                     for playerState in self.playerStates:
                         if playerState.canBid:
-                            boughtProperty = self.propertyCardsToDraw[0]
-                            del self.propertyCardsToDraw[0]
+                            boughtProperty = self.propertyCardsToDraw[
+                                self.onPropertyCard
+                            ]
+                            self.onPropertyCard += 1
                             playerState.propertyCards.append(boughtProperty)
                     # Check for phase end
-                    if len(self.propertyCardsToDraw) == 0:
+                    if len(self.propertyCardsToDraw) == self.onPropertyCard:
                         self.phase = GamePhase.SELLING_HOUSES
                     else:
                         # Reset the auction
@@ -163,7 +299,7 @@ class GameState:
                 # Move on to next player
                 self.rotateBidder()
         elif self.phase == GamePhase.SELLING_HOUSES:
-            biddingPlayer = self.playerStates[self.playerIdSeat[playerId]]
+            biddingPlayer = self.playerStates[seat]
             assert biddingPlayer.propertyBid == 0
             assert (
                 action in biddingPlayer.propertyCards
@@ -172,7 +308,7 @@ class GameState:
             self.handlePropertyBidFinish()
 
     def rotateBidder(self):
-        self.biddingPlayer = (self.biddingPlayer + 1) % self.numPlayers
+        self.biddingPlayer = (self.biddingPlayer + 1) % self.num_players
         if self.playerStates[self.biddingPlayer].canBid == False:
             self.rotateBidder()
 
@@ -187,24 +323,20 @@ class GameState:
         for seat, player in enumerate(self.playerStates):
             seatBidPairs.append((seat, player.propertyBid))
         seatBidPairs = sorted(seatBidPairs, key=lambda sbp: sbp[1], reverse=True)
-        dollarCardsOnTable = list(self.dollarCardsToDraw[0 : self.numPlayers])
-        del self.dollarCardsToDraw[0 : self.numPlayers]
+        dollarCardsOnTable = list(
+            self.dollarCardsToDraw[
+                self.onDollarCard : self.onDollarCard + self.num_players
+            ]
+        )
+        self.onDollarCard += self.num_players
         assert len(dollarCardsOnTable) == len(seatBidPairs)
         for x in range(len(seatBidPairs)):
             playerState = self.playerStates[seatBidPairs[x][0]]
             playerState.dollarCards.append(dollarCardsOnTable[x])
             playerState.removeProperty(seatBidPairs[x][1])
-        if len(self.dollarCardsToDraw) == 0:
+        if len(self.dollarCardsToDraw) == self.onDollarCard:
             # Game is over!
             self.phase = GamePhase.GAME_OVER
-            for i, player in enumerate(self.playerStates):
-                playerScore = player.getScore()
-                print(
-                    "Player",
-                    str(player.playerId)[-4:],
-                    "(" + str(i) + ") has a score: ",
-                    playerScore,
-                )
         else:
             for player in self.playerStates:
                 player.propertyBid = 0

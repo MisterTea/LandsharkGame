@@ -5,11 +5,19 @@ from uuid import UUID, uuid4
 
 
 class PlayerState:
-    def __init__(self, playerId: UUID):
+    __slots__ = [
+        "money",
+        "propertyCards",
+        "dollarCards",
+        "canBid",
+        "moneyBid",
+        "propertyBid",
+    ]
+
+    def __init__(self):
         self.money = 18
         self.propertyCards = []
         self.dollarCards = []
-        self.playerId = playerId
         self.canBid = True
         self.moneyBid = 0
         self.propertyBid = 0
@@ -26,12 +34,9 @@ class PlayerState:
                 return
         assert False
 
-    def print(self):
+    def print(self, seat: int):
         print(
-            "Player " + str(self.playerId)[-4:],
-            self.money,
-            self.propertyCards,
-            self.dollarCards,
+            "Player", seat, self.money, self.propertyCards, self.dollarCards,
         )
 
     def getScore(self) -> Tuple[int, int]:
