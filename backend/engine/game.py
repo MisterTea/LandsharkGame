@@ -162,7 +162,7 @@ class GameState:
         if self.phase == GamePhase.BUYING_HOUSES:
             features[cursor] = player.money
             cursor += 1
-            t = torch.tensor(self.getPropertyOnAuction())
+            t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
             features[cursor + (t - 1)] = 1.0
             cursor += 30
         else:
@@ -170,9 +170,9 @@ class GameState:
         if self.phase == GamePhase.SELLING_HOUSES:
             t = torch.tensor(self.getDollarsOnAuction())
             dollars, counts = torch.unique(t, return_counts=True)
-            features[dollars + cursor] = counts.float()
+            features[dollars.long() + cursor] = counts.float()
             cursor += 16
-            t = torch.tensor(player.propertyCards)
+            t = torch.tensor(player.propertyCards, dtype=torch.long)
             features[cursor + (t - 1)] = 1.0
             cursor += 30
 
