@@ -2,10 +2,14 @@ import random
 
 import torch
 
+from ai.deep_cfr import RegretMatching
 from engine.game import GamePhase, GameState
 
 if __name__ == "__main__":
+    tmpgs = GameState(4)
+    #policy = RegretMatching.load_from_checkpoint("LandsharkAi.torch", feature_dim=tmpgs.feature_dim(), action_dim=tmpgs.action_dim())
     policy = torch.load("LandsharkAi.torch")
+    print(policy)
     random.seed(1)
     for x in range(1000):
         gameState = GameState(4)

@@ -422,7 +422,7 @@ def start_traverse(
 
 
 def train(iterations: int, game: GameInterface, output_file: str):
-    NUM_GAME_ITERATIONS = 100
+    NUM_GAME_ITERATIONS = 10
     playerRegrets = []
     for _ in range(game.num_players):
         playerRegrets.append(
@@ -487,7 +487,7 @@ def train(iterations: int, game: GameInterface, output_file: str):
 
             if (iteration + 1) % 1 == 0:
                 stratModel = RegretMatching(game.feature_dim(), game.action_dim())
-                stratModel.train_model(*strategyData.getFilled(), "strategy", output_file)
+                stratModel.train_model(*strategyData.getFilled(), "strategy", None)
                 bestStrategy = RegretMatchingForward(stratModel)
                 # print(
                 #     "Learned Strategy at " + str(iteration) + ": ", str(bestStrategy),

@@ -82,23 +82,22 @@ class GameState:
             self.onDollarCard = 6
         elif self.num_players == 4:
             # HACK: Reduce rounds to make training faster
-            self.onPropertyCard = 2 + (6*4)
+            self.onPropertyCard = 2 + (5*4)
             self.onDollarCard = self.onPropertyCard
 
-        np.random.shuffle(self.propertyCardsToDraw)
-        np.random.shuffle(self.dollarCardsToDraw)
         self.biddingPlayer = random.randint(0,self.num_players - 1)
+        self.shuffleNext()
 
     def shuffleNext(self):
         if self.phase == GamePhase.BUYING_HOUSES:
-            np.random.shuffle(self.propertyCardsToDraw[self.onPropertyCard:self.onPropertyCard+self.num_players])
+            np.random.shuffle(self.propertyCardsToDraw[self.onPropertyCard:])
             startSort = self.onPropertyCard
             #self.propertyCardsToDraw[startSort : startSort + self.num_players] = sorted(
             #    self.propertyCardsToDraw[startSort : startSort + self.num_players],
             #)
             self.propertyCardsToDraw[startSort : startSort + self.num_players].sort()
         elif self.phase == GamePhase.SELLING_HOUSES:
-            np.random.shuffle(self.dollarCardsToDraw[self.onDollarCard:self.onDollarCard+self.num_players])
+            np.random.shuffle(self.dollarCardsToDraw[self.onDollarCard:])
             startSort = self.onDollarCard
             #self.dollarCardsToDraw[startSort : startSort + self.num_players] = sorted(
             #    self.dollarCardsToDraw[startSort : startSort + self.num_players],
