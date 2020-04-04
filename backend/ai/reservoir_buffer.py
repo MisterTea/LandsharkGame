@@ -2,6 +2,7 @@
 
 import random
 from typing import Iterable, List, Tuple
+import math
 
 import torch
 
@@ -40,7 +41,7 @@ class ReservoirBuffer:
             self.append(remaining)
         else:
             for i in range(num_new_entries):
-                m = random.randint(0, self.observed)
+                m = random.randint(0, self.capacity + int((self.observed - self.capacity)))
                 if m < self.capacity:
                     for j, entry in enumerate(new_entries):
                         self.buffers[j][m] = entry[i]

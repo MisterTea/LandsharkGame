@@ -15,7 +15,9 @@ class PlayerState:
     ]
 
     def __init__(self):
-        self.money = 18
+        # HACK: Reduce rounds to make training faster
+        self.money = 3
+        #self.money = 18
         self.propertyCards = []
         self.dollarCards = []
         self.canBid = True
