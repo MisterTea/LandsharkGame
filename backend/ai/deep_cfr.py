@@ -136,7 +136,7 @@ class RpsGame(GameInterface):
 class RegretMatchingForward(torch.nn.Module):
     def __init__(self, backModule):
         super().__init__()
-        self.layers = backModule.layers
+        self.layers = torch.nn.ModuleList([x.cpu() for x in backModule.layers])
         self.activations = backModule.activations
         #self.forward = backModule.forward
 
