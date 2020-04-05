@@ -6,8 +6,8 @@ from enum import IntEnum
 from typing import Dict, List, Tuple
 from uuid import UUID, uuid4
 
-import torch
 import numpy as np
+import torch
 
 from engine.player import PlayerState
 
@@ -55,8 +55,8 @@ class GameState:
         self.playerStates = tuple(playerStates)
 
         # HACK: Reduce rounds to make training faster
-        #self.money = np.array([5] * self.num_players, dtype=np.int)
-        self.money = np.array([18] * self.num_players, dtype=np.int)
+        self.money = np.array([5] * self.num_players, dtype=np.int)
+        # self.money = np.array([18] * self.num_players, dtype=np.int)
         self.moneyBid = np.zeros((self.num_players,), dtype=np.int)
         self.canBid = np.zeros((self.num_players,), dtype=np.bool)
         self.canBid[:] = True
@@ -94,33 +94,33 @@ class GameState:
             self.onDollarCard = 6
         elif self.num_players == 4:
             # HACK: Reduce rounds to make training faster
-            self.onPropertyCard = 2 + (0*4)
+            self.onPropertyCard = 2 + (5 * 4)
             self.onDollarCard = self.onPropertyCard
 
-        self.biddingPlayer = random.randint(0,self.num_players - 1)
+        self.biddingPlayer = random.randint(0, self.num_players - 1)
 
         # Shuffle all the cards
         np.random.shuffle(self.propertyCardsToDraw)
         np.random.shuffle(self.dollarCardsToDraw)
-        
+
         # Call shuffleNext to ensure the first batch is sorted
         self.shuffleNext()
 
     def shuffleNext(self):
         if self.phase == GamePhase.BUYING_HOUSES:
-            np.random.shuffle(self.propertyCardsToDraw[self.onPropertyCard:])
+            np.random.shuffle(self.propertyCardsToDraw[self.onPropertyCard :])
             startSort = self.onPropertyCard
-            #self.propertyCardsToDraw[startSort : startSort + self.num_players] = sorted(
+            # self.propertyCardsToDraw[startSort : startSort + self.num_players] = sorted(
             #    self.propertyCardsToDraw[startSort : startSort + self.num_players],
-            #)
+            # )
             self.propertyCardsToDraw[startSort : startSort + self.num_players].sort()
         elif self.phase == GamePhase.SELLING_HOUSES:
-            np.random.shuffle(self.dollarCardsToDraw[self.onDollarCard:])
+            np.random.shuffle(self.dollarCardsToDraw[self.onDollarCard :])
             startSort = self.onDollarCard
-            #self.dollarCardsToDraw[startSort : startSort + self.num_players] = sorted(
+            # self.dollarCardsToDraw[startSort : startSort + self.num_players] = sorted(
             #    self.dollarCardsToDraw[startSort : startSort + self.num_players],
             #    reverse=True,
-            #)
+            # )
             self.dollarCardsToDraw[startSort : startSort + self.num_players].sort()
         else:
             assert False
@@ -128,7 +128,11 @@ class GameState:
     def print(self):
         for player in range(self.num_players):
             print(
-                "Player", player, self.money[player], self.playerStates[player].propertyCards, self.playerStates[player].dollarCards,
+                "Player",
+                player,
+                self.money[player],
+                self.playerStates[player].propertyCards,
+                self.playerStates[player].dollarCards,
             )
         if self.phase == GamePhase.BUYING_HOUSES:
             print("Houses on auction: " + str(self.getPropertyOnAuction()))
@@ -146,10 +150,12 @@ class GameState:
         return self.phase == GamePhase.GAME_OVER
 
     def payoffs(self):
-        absolute_payoff = torch.tensor([float(self.getScore(i)) for i in range(self.num_players)])
+        absolute_payoff = torch.tensor(
+            [float(self.getScore(i)) for i in range(self.num_players)]
+        )
         places = torch.sort(absolute_payoff)[1]
         payoff = torch.zeros_like(absolute_payoff)
-        scores = torch.tensor([-8.0,-2.0,2.0,8.0])
+        scores = torch.tensor([-8.0, -2.0, 2.0, 8.0])
         for index, place in enumerate(places):
             payoff[place] = scores[index]
         return payoff
@@ -159,7 +165,12 @@ class GameState:
         player = self.playerStates[player_index]
         actions = self.getPossibleActions(player_index)
         actions_one_hot = torch.zeros((self.action_dim(),), dtype=torch.int)
-        if False and self.phase == GamePhase.BUYING_HOUSES and player.moneyBid > 0 and hacks:
+        if (
+            False
+            and self.phase == GamePhase.BUYING_HOUSES
+            and player.moneyBid > 0
+            and hacks
+        ):
             # HACK: Let's fold after 1 round of bidding to speed up training
             actions_one_hot[0] = 1
         else:
@@ -265,13 +276,9 @@ class GameState:
             assert self.canBid[seat]
             if self.highestBid == -1:
                 # Can't fold if there are no bids
-                return list(
-                    range(self.highestBid + 1, self.money[seat] + 1)
-                )
+                return list(range(self.highestBid + 1, self.money[seat] + 1))
             else:
-                return [-1] + list(
-                    range(self.highestBid + 1, self.money[seat] + 1)
-                )
+                return [-1] + list(range(self.highestBid + 1, self.money[seat] + 1))
         elif self.phase == GamePhase.SELLING_HOUSES:
             assert self.propertyBid[seat] == 0
             return list(self.playerStates[seat].propertyCards)
@@ -301,9 +308,7 @@ class GameState:
                 if biddersLeft == 1:
                     bidder_left = np.where(self.canBid)[0][0]
                     assert self.canBid[bidder_left]
-                    boughtProperty = self.propertyCardsToDraw[
-                        self.onPropertyCard
-                    ]
+                    boughtProperty = self.propertyCardsToDraw[self.onPropertyCard]
                     self.onPropertyCard += 1
                     self.playerStates[bidder_left].propertyCards.append(boughtProperty)
                     # Check for phase end
@@ -356,15 +361,17 @@ class GameState:
             seatBidPairs.append((seat, self.propertyBid[seat]))
         seatBidPairs = sorted(seatBidPairs, key=lambda sbp: sbp[1], reverse=True)
         dollarCardsOnTable = self.dollarCardsToDraw[
-                self.onDollarCard : self.onDollarCard + self.num_players
-            ]
+            self.onDollarCard : self.onDollarCard + self.num_players
+        ]
         self.onDollarCard += self.num_players
         assert len(dollarCardsOnTable) == len(seatBidPairs)
         for x in range(len(seatBidPairs)):
             player = seatBidPairs[x][0]
             property_sold = seatBidPairs[x][1]
             playerState = self.playerStates[player]
-            playerState.dollarCards.append(dollarCardsOnTable[(len(seatBidPairs) - 1) - x])
+            playerState.dollarCards.append(
+                dollarCardsOnTable[(len(seatBidPairs) - 1) - x]
+            )
             self.removeProperty(player, property_sold)
         if len(self.dollarCardsToDraw) == self.onDollarCard:
             # Game is over!
@@ -374,19 +381,19 @@ class GameState:
             # Shuffle cards for the next auction
             self.shuffleNext()
 
-    def getLargestHouse(self, player:int):
+    def getLargestHouse(self, player: int):
         if len(self.playerStates[player].propertyCards) == 0:
             return 0
         return max(self.playerStates[player].propertyCards)
 
-    def removeProperty(self, player:int, property: int):
+    def removeProperty(self, player: int, property: int):
         for i, p in enumerate(self.playerStates[player].propertyCards):
             if p == property:
                 del self.playerStates[player].propertyCards[i]
                 return
         assert False
 
-    def getScore(self, player:int) -> float:
+    def getScore(self, player: int) -> float:
         totalMoney = self.money[player] + sum(self.playerStates[player].dollarCards)
         cashMoney = self.money[player]
         return totalMoney + cashMoney / 1000.0
