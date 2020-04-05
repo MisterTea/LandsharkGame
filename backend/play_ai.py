@@ -13,6 +13,7 @@ if __name__ == "__main__":
     random.seed(1)
     for x in range(1000):
         gameState = GameState(4)
+        gameState.reset()
         features = torch.zeros((1, gameState.feature_dim()), dtype=torch.float)
         while gameState.phase != GamePhase.GAME_OVER:
             seatToAct = gameState.get_players_to_act()[0]

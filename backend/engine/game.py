@@ -86,6 +86,12 @@ class GameState:
             self.onDollarCard = self.onPropertyCard
 
         self.biddingPlayer = random.randint(0,self.num_players - 1)
+
+        # Shuffle all the cards
+        np.random.shuffle(self.propertyCardsToDraw)
+        np.random.shuffle(self.dollarCardsToDraw)
+        
+        # Call shuffleNext to ensure the first batch is sorted
         self.shuffleNext()
 
     def shuffleNext(self):
