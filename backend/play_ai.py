@@ -15,7 +15,7 @@ if __name__ == "__main__":
         gameState = GameState(4)
         gameState.reset()
         features = torch.zeros((1, gameState.feature_dim()), dtype=torch.float)
-        while gameState.phase != GamePhase.GAME_OVER:
+        while not gameState.terminal():
             seatToAct = gameState.get_players_to_act()[0]
             possible_actions = gameState.getPossibleActions(seatToAct)
             gameState.print()
