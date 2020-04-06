@@ -280,9 +280,9 @@ class GameState:
             assert self.canBid[seat]
             if self.highestBid == -1:
                 # Can't fold if there are no bids
-                return list(range(self.highestBid + 1, self.money[seat] + 1))
+                return list(range(self.highestBid + 1, self.money[seat] + self.moneyBid[seat] + 1))
             else:
-                return [-1] + list(range(self.highestBid + 1, self.money[seat] + 1))
+                return [-1] + list(range(self.highestBid + 1, self.money[seat] + self.moneyBid[seat] + 1))
         elif self.phase == GamePhase.SELLING_HOUSES:
             assert self.propertyBid[seat] == 0
             return list(self.playerStates[seat].propertyCards)

@@ -39,7 +39,7 @@ if __name__ == "__main__":
                 )
                 gameState.act(seatToAct, action_index)
         for i, player in enumerate(gameState.playerStates):
-            playerScore = player.getScore()
+            playerScore = gameState.getScore(i)
             print(
                 "Player", i, "has a score: ", playerScore,
             )
