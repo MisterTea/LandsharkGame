@@ -7,7 +7,7 @@ from engine.game import GamePhase, GameState
 
 if __name__ == "__main__":
     tmpgs = GameState(4)
-    #policy = RegretMatching.load_from_checkpoint("LandsharkAi.torch", feature_dim=tmpgs.feature_dim(), action_dim=tmpgs.action_dim())
+    # policy = RegretMatching.load_from_checkpoint("LandsharkAi.torch", feature_dim=tmpgs.feature_dim(), action_dim=tmpgs.action_dim())
     policy = torch.load("LandsharkAi.torch")
     print(policy)
     random.seed(1)
@@ -29,7 +29,7 @@ if __name__ == "__main__":
             else:
                 gameState.populate_features(features[0])
                 action_probs = policy(features).detach()[0]
-                possible_action_mask = gameState.get_one_hot_actions(False)
+                possible_action_mask = gameState.get_one_hot_actions(True)
                 action_index = int(
                     torch.distributions.Categorical(
                         torch.nn.Softmax(dim=0)(action_probs) * possible_action_mask

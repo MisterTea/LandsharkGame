@@ -1,19 +1,20 @@
 #%%
+import hashlib
+import os
 import random
 from collections import Counter
 from copy import deepcopy
 from enum import IntEnum
 from multiprocessing import Pool
 from typing import List, Optional, Tuple
-import hashlib
-import os
 
-import torch
 import pytorch_lightning as pl
+import torch
+
 from ai.reservoir_buffer import ReservoirBuffer
 from engine.game import GamePhase, GameState
-from utils.profiler import Profiler
 from utils.priority import lowpriority
+from utils.profiler import Profiler
 
 
 class GameInterface:
@@ -622,13 +623,18 @@ def train(iterations: int, game: GameInterface, output_file: str):
                             not gameState.terminal()
                         ):  # gameState.phase != GamePhase.GAME_OVER:
                             seatToAct = gameState.get_player_to_act()
-                            possible_action_mask = gameState.get_one_hot_actions(False)
                             if seatToAct == 0:
+                                possible_action_mask = gameState.get_one_hot_actions(
+                                    True
+                                )
                                 gameState.populate_features(features[0])
                                 action_probs = (
                                     bestStrategy(features).detach()[0].clamp(min=1e-6)
                                 )
                             else:
+                                possible_action_mask = gameState.get_one_hot_actions(
+                                    False
+                                )
                                 action_probs = possible_action_mask.float()
                             action_prob_dist = torch.distributions.Categorical(
                                 action_probs * possible_action_mask
