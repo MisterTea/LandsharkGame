@@ -13,6 +13,7 @@ import pytorch_lightning as pl
 from ai.reservoir_buffer import ReservoirBuffer
 from engine.game import GamePhase, GameState
 from utils.profiler import Profiler
+from utils.priority import lowpriority
 
 
 class GameInterface:
@@ -44,7 +45,7 @@ class GameInterface:
     def get_player_to_act(self) -> int:
         raise NotImplementedError()
 
-    def get_one_hot_actions(self, hacks=True) -> torch.Tensor:
+    def get_one_hot_actions(self, hacks) -> torch.Tensor:
         raise NotImplementedError()
 
     def reset(self):
@@ -81,13 +82,13 @@ class RpsGame(GameInterface):
                     # print(a2, "ties", a1)
 
                 if a1 == RpsGame.ActionName.LOSE and a2 == RpsGame.ActionName.LOSE:
-                    self.payoff_matrix[a1,a2,:] = -10
+                    self.payoff_matrix[a1, a2, :] = -10
                 elif a1 == RpsGame.ActionName.LOSE:
-                    self.payoff_matrix[a1,a2,0] = -10
-                    self.payoff_matrix[a1,a2,1] = 1
+                    self.payoff_matrix[a1, a2, 0] = -10
+                    self.payoff_matrix[a1, a2, 1] = 1
                 elif a2 == RpsGame.ActionName.LOSE:
-                    self.payoff_matrix[a1,a2,0] = 1
-                    self.payoff_matrix[a1,a2,1] = -10
+                    self.payoff_matrix[a1, a2, 0] = 1
+                    self.payoff_matrix[a1, a2, 1] = -10
 
         self.reset()
 
@@ -110,10 +111,10 @@ class RpsGame(GameInterface):
     def payoffs(self):
         return self.payoff_matrix[self.actions[0], self.actions[1]]
 
-    def get_one_hot_actions(self, hacks=True):
+    def get_one_hot_actions(self, hacks):
         return torch.ones((len(RpsGame.ActionName),), dtype=torch.float)
 
-    def populate_features(self, features:torch.Tensor):
+    def populate_features(self, features: torch.Tensor):
         features.fill_(1.0)
 
     def feature_dim(self):
@@ -138,7 +139,7 @@ class RegretMatchingForward(torch.nn.Module):
         super().__init__()
         self.layers = torch.nn.ModuleList([x.cpu() for x in backModule.layers])
         self.activations = backModule.activations
-        #self.forward = backModule.forward
+        # self.forward = backModule.forward
 
     def forward(self, inputs):
         x = inputs
@@ -148,22 +149,23 @@ class RegretMatchingForward(torch.nn.Module):
                 x = self.activations[i](x)
         return x
 
+
 class RegretMatching(pl.LightningModule):
     def __init__(self, feature_dim: int, action_dim: int):
         super().__init__()
-        #self.layers = torch.nn.ModuleList([
-        #    torch.nn.Linear(feature_dim, 128),
-        #    torch.nn.Linear(128, 64),
-        #    torch.nn.Linear(64, action_dim),
-        #    ])
-        #self.activations = torch.nn.ModuleList([
-        #    torch.nn.ReLU(),
-        #    torch.nn.ReLU(),
-        #    None,
-        #])
-        self.layers = torch.nn.ModuleList([torch.nn.Linear(feature_dim, action_dim),])
-        self.activations = torch.nn.ModuleList([None])
-        #self.forward_cache_dict = {}
+        self.layers = torch.nn.ModuleList(
+            [
+                torch.nn.Linear(feature_dim, 128),
+                torch.nn.Linear(128, 64),
+                torch.nn.Linear(64, action_dim),
+            ]
+        )
+        self.activations = torch.nn.ModuleList(
+            [torch.nn.ReLU(), torch.nn.ReLU(), None,]
+        )
+        # self.layers = torch.nn.ModuleList([torch.nn.Linear(feature_dim, action_dim),])
+        # self.activations = torch.nn.ModuleList([None])
+        # self.forward_cache_dict = {}
 
     def forward_cache(self, inputs):
         input_key = hashlib.blake2b(inputs.numpy().tobytes()).digest()
@@ -183,24 +185,46 @@ class RegretMatching(pl.LightningModule):
                 x = self.activations[i](x)
         return x
 
-    def train_model(self, features, active_labels, labels, model_name, output_file=None):
+    def train_model(
+        self, features, active_labels, labels, model_name, output_file=None
+    ):
         full_dataset = torch.utils.data.TensorDataset(features, active_labels, labels)
         dataset_size = len(full_dataset)
         test_size = dataset_size // 5
         train_size = dataset_size - test_size
-        self.train_dataset, self.val_dataset = torch.utils.data.random_split(full_dataset, [train_size, test_size])
-        print("TRAINING ON",dataset_size, len(self.train_dataset), len(self.val_dataset))
-        trainer = pl.Trainer(early_stop_callback=True, max_epochs=1000, default_save_path=os.path.join(os.getcwd(), 'models', model_name))
+        self.train_dataset, self.val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, test_size]
+        )
+        print(
+            "TRAINING ON", dataset_size, len(self.train_dataset), len(self.val_dataset)
+        )
+        trainer = pl.Trainer(
+            gpus=1,
+            early_stop_callback=True,
+            max_epochs=1000,
+            default_save_path=os.path.join(os.getcwd(), "models", model_name),
+        )
         trainer.fit(self)
         if output_file is not None:
             trainer.save_checkpoint(output_file)
         self.train_dataset = self.val_dataset = None
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.train_dataset, batch_size=1024, shuffle=True, drop_last=False)
+        return torch.utils.data.DataLoader(
+            self.train_dataset,
+            batch_size=1024,
+            shuffle=True,
+            drop_last=False,
+            pin_memory=True,
+        )
 
     def val_dataloader(self):
-        return torch.utils.data.DataLoader(self.val_dataset, batch_size=1024*1024*1024, drop_last=False)
+        return torch.utils.data.DataLoader(
+            self.val_dataset,
+            batch_size=1024 * 1024 * 1024,
+            drop_last=False,
+            pin_memory=True,
+        )
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=0.01)
@@ -214,12 +238,12 @@ class RegretMatching(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         train_results = self.training_step(batch, batch_idx)
-        return {'val_loss': train_results["loss"]}
+        return {"val_loss": train_results["loss"]}
 
     def validation_epoch_end(self, outputs):
-        avg_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
-        tensorboard_logs = {'val_loss': avg_loss}
-        return {'val_loss': avg_loss, 'log': tensorboard_logs}
+        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+        tensorboard_logs = {"val_loss": avg_loss}
+        return {"val_loss": avg_loss, "log": tensorboard_logs}
 
     def train_model_(self, features, active_labels, labels):
         self.forward_cache_dict.clear()
@@ -230,8 +254,11 @@ class RegretMatching(pl.LightningModule):
         last_loss = 1e10
         for train_iteration in range(MAX_TRAIN_ITERATIONS):
             regretOptimizer.zero_grad()
-            train_outputs = self(features.detach().requires_grad_()) * active_labels.detach().requires_grad_()
-            #assert (labels[active_labels == 0]).sum() < 1e-6
+            train_outputs = (
+                self(features.detach().requires_grad_())
+                * active_labels.detach().requires_grad_()
+            )
+            # assert (labels[active_labels == 0]).sum() < 1e-6
             loss = criterion(train_outputs, labels)
             if train_iteration % (MAX_TRAIN_ITERATIONS // 10) == 0:
                 pass
@@ -247,7 +274,7 @@ class RegretMatching(pl.LightningModule):
 
 
 class TensorData:
-    def __init__(self, capacity: int, dims:List[int]):
+    def __init__(self, capacity: int, dims: List[int]):
         self.filled = 0
         self.features = torch.zeros((capacity, dims[0]), dtype=torch.float)
         self.active_labels = torch.zeros((capacity, dims[1]), dtype=torch.float)
@@ -257,9 +284,7 @@ class TensorData:
     def capacity(self):
         return self.features.size()[0]
 
-    def append(
-        self, tensors:List[torch.Tensor]
-    ):
+    def append(self, tensors: List[torch.Tensor]):
         features, active_labels, labels = tensors
         assert len(features.size()) == 2
         assert len(active_labels.size()) == 2
@@ -302,37 +327,51 @@ class TensorData:
 def traverse(
     game: GameInterface,
     player_to_train: int,
-    regretModels: List[Optional[RegretMatching]],
+    regretModels: List[Optional[RegretMatchingForward]],
     playerRegret: TensorData,
+    strategyModels: List[Optional[RegretMatchingForward]],
     strategyData: TensorData,
     metrics: Counter,
     level: int,
-    first_pass: bool
+    first_pass: bool,
+    branch_factor_estimate: float,
 ) -> torch.Tensor:
     if game.terminal():
         return game.payoffs()
-
-    metrics.update({"visit_level_" + str(level): 1})
-    metrics["visit"] += 1
-    if metrics["visit"] % 10000 == 0:
-        print("Visits",metrics["visit"])
 
     features = torch.zeros((game.feature_dim(),), dtype=torch.float)
     game.populate_features(features)
 
     player_to_act = game.get_player_to_act()
     model = regretModels[player_to_act]
-    possible_actions = game.get_one_hot_actions()
+    possible_actions = game.get_one_hot_actions(True)
+    num_choices = possible_actions.sum()
+    branch_factor_estimate = float((branch_factor_estimate * level) + (num_choices)) / (
+        level + 1.0
+    )
     metrics.update({"possible_actions_" + str(possible_actions.sum()): 1})
-    has_a_choice = possible_actions.sum() > 1
+    has_a_choice = num_choices > 1
     if model is None:
         strategy = possible_actions.float()
+        active_sampling_chances = None
     else:
         model_regrets = model.forward(features.unsqueeze(0))[0]
         model_probs = model_regrets.clamp(min=1e-6) * possible_actions.float()
         strategy = model_probs
+        active_sampling_chances = (
+            strategyModels[player_to_act].forward(features.unsqueeze(0))[0]
+            * possible_actions.float()
+        )
+        active_sampling_chances_sum = float(active_sampling_chances.sum().item())
 
     action_dist = torch.distributions.Categorical(strategy)
+
+    chance_to_sample = (
+        1.0
+        if level == 0
+        else 1.0 - (1.0 / (20.0 ** (1.0 / ((level) ** branch_factor_estimate))))
+    )
+    do_sample = random.random() < chance_to_sample
 
     if has_a_choice and first_pass:
         strategyData.append(
@@ -343,9 +382,27 @@ def traverse(
             )
         )
 
-    if player_to_train == player_to_act and has_a_choice:
+    metrics.update({"visit_level_" + str(level): 1})
+    metrics["visit"] += 1
+    if metrics["visit"] % 100000 == 0:
+        print("Visits", metrics["visit"])
+
+    can_traverse = player_to_train == player_to_act
+    if can_traverse and has_a_choice and do_sample:
+        # print("PASSED",level,chance_to_sample)
+        metrics.update({"sample_level_" + str(level): 1})
+        metrics["sample"] += 1
+        if metrics["sample_level_" + str(level)] % 10000 == 0:
+            print(
+                "Samples",
+                metrics["sample"],
+                metrics["sample_level_" + str(level)],
+                level,
+                chance_to_sample,
+            )
+
         payoff_for_action = torch.zeros_like(possible_actions, dtype=torch.float)
-        #chosen_actions = torch.zeros_like(possible_actions)
+        chosen_actions = torch.zeros_like(possible_actions)
         enum_actions = list(enumerate(possible_actions))
         random.shuffle(enum_actions)
         num_chosen = 0
@@ -355,28 +412,49 @@ def traverse(
                 continue
             g = game.clone()
             g.act(player_to_act, i)
-            if True:
+
+            # Active sampling: https://papers.nips.cc/paper/4569-efficient-monte-carlo-counterfactual-regret-minimization-in-games-with-many-player-actions.pdf
+            EPSILON = 0.05
+            BONUS = 1000000
+            THRESHOLD = 1000
+            if active_sampling_chances is None:
+                # Do Outcome sampling for the first iteration
+                as_pass = num_chosen == 0
+            else:
+                as_pass = random.random() < float(
+                    (
+                        (BONUS + THRESHOLD * active_sampling_chances[i])
+                        / (BONUS + active_sampling_chances_sum)
+                    ).item()
+                )
+            if level == 0:
+                # Do external sampling for the game tree root
+                as_pass = True
+            if random.random() < EPSILON or as_pass:
                 value = traverse(
                     g,
                     player_to_train,
                     regretModels,
                     playerRegret,
+                    strategyModels,
                     strategyData,
                     metrics,
                     level + 1,
-                    True if first_pass and num_chosen == 0 else False
+                    True if first_pass and num_chosen == 0 else False,
+                    branch_factor_estimate,
                 )
                 expected_value += value * action_dist.probs[i]
                 payoff_for_action[i] = value[player_to_act]
-                #chosen_actions[i] = 1.0
+                chosen_actions[i] = 1.0
                 num_chosen += 1
-        #weighted_action_dist = torch.distributions.Categorical(action_dist.probs * chosen_actions.float())
-        expected_utility = (payoff_for_action * action_dist.probs).sum().item()
+        weighted_action_dist = torch.distributions.Categorical(
+            action_dist.probs * chosen_actions.float()
+        )
+        expected_utility = (payoff_for_action * weighted_action_dist.probs).sum().item()
         playerRegret.append(
             (
                 features.unsqueeze(0),
-                #chosen_actions.unsqueeze(0),
-                possible_actions.unsqueeze(0),
+                chosen_actions.unsqueeze(0),
                 (payoff_for_action - expected_utility).unsqueeze(0),
             )
         )
@@ -388,25 +466,29 @@ def traverse(
             player_to_train,
             regretModels,
             playerRegret,
+            strategyModels,
             strategyData,
             metrics,
-            level + 1,
-            True if first_pass else False
+            level + int(can_traverse),
+            True if first_pass else False,
+            branch_factor_estimate,
         )
 
 
 def start_traverse(
     game: GameInterface,
-    player_to_train:int,
+    player_to_train: int,
     regretModels: List[Optional[RegretMatching]],
+    strategyModels: List[Optional[RegretMatching]],
 ) -> Tuple[int, TensorData, TensorData, Counter]:
-    NUM_INNER_GAME_ITERATIONS=100
+    lowpriority()
+    NUM_INNER_GAME_ITERATIONS = 100
     with torch.no_grad():
         playerRegret = TensorData(
-                16 * 1024, (game.feature_dim(), game.action_dim(), game.action_dim())
-            )
+            16 * 1024, (game.feature_dim(), game.action_dim(), game.action_dim())
+        )
         strategyData = TensorData(
-            1024, (game.feature_dim(), game.action_dim(), game.action_dim())
+            16 * 1024, (game.feature_dim(), game.action_dim(), game.action_dim())
         )
         metrics: Counter = Counter()
         for _ in range(NUM_INNER_GAME_ITERATIONS):
@@ -414,7 +496,16 @@ def start_traverse(
             ng.reset()
             with Profiler(False):
                 traverse(
-                    ng, player_to_train, regretModels, playerRegret, strategyData, metrics, 0, True
+                    ng,
+                    player_to_train,
+                    regretModels,
+                    playerRegret,
+                    strategyModels,
+                    strategyData,
+                    metrics,
+                    0,
+                    True,
+                    1,
                 )
         # print(metrics)
 
@@ -435,25 +526,38 @@ def train(iterations: int, game: GameInterface, output_file: str):
         1024 * 1024, (game.feature_dim(), game.action_dim(), game.action_dim()),
     )
 
-    with Pool(os.cpu_count()//2) as gamePool:
+    with Pool(os.cpu_count()) as gamePool:
         for iteration in range(iterations):
             print("ON ITERATION", iteration)
             regretModels: List[Optional[RegretMatching]] = []
+            stratModels: List[Optional[RegretMatching]] = []
             if iteration > 0:
                 for player in range(game.num_players):
                     regretModel = RegretMatching(game.feature_dim(), game.action_dim())
                     # Train the regret model
-                    regretModel.train_model(*playerRegrets[player].getFilled(), "regret_"+str(player), None)
+                    regretModel.train_model(
+                        *playerRegrets[player].getFilled(),
+                        "regret_" + str(player),
+                        None
+                    )
 
                     regretForwardModel = RegretMatchingForward(regretModel)
                     torch.save(regretForwardModel, "test.model")
                     # Throw away the data from the last iteration
                     # playerRegrets[player].reset()
                     regretModels.append(regretForwardModel)
+
+                    stratModel = RegretMatching(game.feature_dim(), game.action_dim())
+                    features, active_labels, labels = strategyData.getFilled()
+                    stratModel.train_model(
+                        features, active_labels, labels, "strategy_" + str(player), None
+                    )
+                    stratModels.append(RegretMatchingForward(stratModel))
             else:
                 # Begin with random strategies
                 for _ in range(game.num_players):
                     regretModels.append(None)
+                    stratModels.append(None)
 
             with torch.no_grad():
                 starts = []
@@ -462,7 +566,9 @@ def train(iterations: int, game: GameInterface, output_file: str):
                         # print("Queueing Game", player_to_train, game_iteration)
                         new_game = game.clone()
                         new_game.reset()
-                        starts.append((new_game, player_to_train, regretModels))
+                        starts.append(
+                            (new_game, player_to_train, regretModels, stratModels)
+                        )
 
                 if True:
                     results = gamePool.starmap(start_traverse, starts)
@@ -487,7 +593,10 @@ def train(iterations: int, game: GameInterface, output_file: str):
 
             if (iteration + 1) % 1 == 0:
                 stratModel = RegretMatching(game.feature_dim(), game.action_dim())
-                stratModel.train_model(*strategyData.getFilled(), "strategy", None)
+                features, active_labels, labels = strategyData.getFilled()
+                stratModel.train_model(
+                    features, active_labels, labels, "strategy", None
+                )
                 bestStrategy = RegretMatchingForward(stratModel)
                 # print(
                 #     "Learned Strategy at " + str(iteration) + ": ", str(bestStrategy),
@@ -500,43 +609,44 @@ def train(iterations: int, game: GameInterface, output_file: str):
                     scoreCounter: Counter = Counter()
                     NUM_RANDOM_GAMES = 1000
                     num_decisions = 0
-                    average_decision = torch.zeros((game.action_dim(),), dtype=torch.float)
+                    average_decision = torch.zeros(
+                        (game.action_dim(),), dtype=torch.float
+                    )
                     for on_game in range(NUM_RANDOM_GAMES):
                         gameState = game.clone()
                         gameState.reset()
                         features = torch.zeros(
                             (1, gameState.feature_dim()), dtype=torch.float
                         )
-                        while not gameState.terminal():#gameState.phase != GamePhase.GAME_OVER:
+                        while (
+                            not gameState.terminal()
+                        ):  # gameState.phase != GamePhase.GAME_OVER:
                             seatToAct = gameState.get_player_to_act()
                             possible_action_mask = gameState.get_one_hot_actions(False)
                             if seatToAct == 0:
                                 gameState.populate_features(features[0])
-                                action_probs = bestStrategy(features).detach()[0].clamp(min=1e-6)
+                                action_probs = (
+                                    bestStrategy(features).detach()[0].clamp(min=1e-6)
+                                )
                             else:
                                 action_probs = possible_action_mask.float()
                             action_prob_dist = torch.distributions.Categorical(
-                                    action_probs
-                                    * possible_action_mask
-                                )
-                            if on_game == 0:
-                                print("ACTION",action_prob_dist.probs)
-                            action_index = int(
-                                action_prob_dist
-                                .sample()
-                                .item()
+                                action_probs * possible_action_mask
                             )
+                            if on_game == 0:
+                                print("ACTION", action_prob_dist.probs)
+                            action_index = int(action_prob_dist.sample().item())
                             average_decision[action_index] += 1.0
                             num_decisions += 1
                             gameState.act(seatToAct, action_index)
                         payoffs = gameState.payoffs()
-                        for i,p in enumerate(payoffs):
+                        for i, p in enumerate(payoffs):
                             scoreCounter[str(i)] += p
                     print("DECISION HISTOGRAM")
                     print(average_decision / num_decisions)
                     print("SCORE AGAINST RANDOM")
                     for x in range(gameState.num_players):
-                        print(x,scoreCounter[str(x)] / float(NUM_RANDOM_GAMES))
+                        print(x, scoreCounter[str(x)] / float(NUM_RANDOM_GAMES))
 
     stratModel = RegretMatching(game.feature_dim(), game.action_dim())
     stratModel.train_model(*strategyData.getFilled())
@@ -545,3 +655,6 @@ def train(iterations: int, game: GameInterface, output_file: str):
 
 # bestStrategy = train(100, RpsGame())
 # print("FINAL STRAT: ", bestStrategy)
+
+
+# %%

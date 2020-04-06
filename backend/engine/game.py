@@ -55,8 +55,8 @@ class GameState:
         self.playerStates = tuple(playerStates)
 
         # HACK: Reduce rounds to make training faster
-        self.money = np.array([5] * self.num_players, dtype=np.int)
-        # self.money = np.array([18] * self.num_players, dtype=np.int)
+        #self.money = np.array([5] * self.num_players, dtype=np.int)
+        self.money = np.array([18] * self.num_players, dtype=np.int)
         self.moneyBid = np.zeros((self.num_players,), dtype=np.int)
         self.canBid = np.zeros((self.num_players,), dtype=np.bool)
         self.canBid[:] = True
@@ -94,7 +94,7 @@ class GameState:
             self.onDollarCard = 6
         elif self.num_players == 4:
             # HACK: Reduce rounds to make training faster
-            self.onPropertyCard = 2 + (5 * 4)
+            self.onPropertyCard = 2 + (0 * 4)
             self.onDollarCard = self.onPropertyCard
 
         self.biddingPlayer = random.randint(0, self.num_players - 1)
@@ -160,7 +160,7 @@ class GameState:
             payoff[place] = scores[index]
         return payoff
 
-    def get_one_hot_actions(self, hacks=True):
+    def get_one_hot_actions(self, hacks):
         player_index = self.get_player_to_act()
         player = self.playerStates[player_index]
         actions = self.getPossibleActions(player_index)
@@ -176,8 +176,8 @@ class GameState:
         else:
             for a in actions:
                 if self.phase == GamePhase.BUYING_HOUSES:
-                    # HACK: Do not ever bid more than 6
-                    if a <= 6 or hacks == False:
+                    # HACK: Do not ever bid more than the spread
+                    if a <= self.getPropertySpread() or hacks == False:
                         actions_one_hot[1 + a] = 1
                 elif self.phase == GamePhase.SELLING_HOUSES:
                     actions_one_hot[20 + (a - 1)] = 1
@@ -187,6 +187,10 @@ class GameState:
 
     def feature_dim(self):
         return 77
+    
+    def getPropertySpread(self):
+        a = self.getPropertyOnAuction()
+        return int(a.max() - a.min())
 
     def populate_features(self, features: torch.Tensor):
         player_index = self.get_player_to_act()

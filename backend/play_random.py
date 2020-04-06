@@ -26,7 +26,7 @@ if __name__ == "__main__":
                     action = int(action)
                     gameState.playerAction(seatToAct, action)
                 else:
-                    possible_action_mask = gameState.get_one_hot_actions()
+                    possible_action_mask = gameState.get_one_hot_actions(False)
                     action_hist[seatToAct] += possible_action_mask
                     action_probs = possible_action_mask.float()
                     action_index = int(torch.distributions.Categorical(

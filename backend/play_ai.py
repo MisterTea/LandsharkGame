@@ -29,7 +29,7 @@ if __name__ == "__main__":
             else:
                 gameState.populate_features(features[0])
                 action_probs = policy(features).detach()[0]
-                possible_action_mask = gameState.get_one_hot_actions()
+                possible_action_mask = gameState.get_one_hot_actions(False)
                 action_index = int(
                     torch.distributions.Categorical(
                         torch.nn.Softmax(dim=0)(action_probs) * possible_action_mask
