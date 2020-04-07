@@ -55,7 +55,7 @@ class GameState:
         self.playerStates = tuple(playerStates)
 
         # HACK: Reduce rounds to make training faster
-        #self.money = np.array([5] * self.num_players, dtype=np.int)
+        # self.money = np.array([5] * self.num_players, dtype=np.int)
         self.money = np.array([18] * self.num_players, dtype=np.int)
         self.moneyBid = np.zeros((self.num_players,), dtype=np.int)
         self.canBid = np.zeros((self.num_players,), dtype=np.bool)
@@ -176,8 +176,8 @@ class GameState:
         else:
             for a in actions:
                 if self.phase == GamePhase.BUYING_HOUSES:
-                    # HACK: Do not ever bid more than the spread
-                    if a <= self.getPropertySpread() or hacks == False:
+                    # HACK: Do not ever bid more than the spread/2
+                    if (a * 2) <= self.getPropertySpread() or hacks == False:
                         actions_one_hot[1 + a] = 1
                 elif self.phase == GamePhase.SELLING_HOUSES:
                     actions_one_hot[20 + (a - 1)] = 1
@@ -187,7 +187,7 @@ class GameState:
 
     def feature_dim(self):
         return 77
-    
+
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
         return int(a.max() - a.min())
@@ -280,9 +280,17 @@ class GameState:
             assert self.canBid[seat]
             if self.highestBid == -1:
                 # Can't fold if there are no bids
-                return list(range(self.highestBid + 1, self.money[seat] + self.moneyBid[seat] + 1))
+                return list(
+                    range(
+                        self.highestBid + 1, self.money[seat] + self.moneyBid[seat] + 1
+                    )
+                )
             else:
-                return [-1] + list(range(self.highestBid + 1, self.money[seat] + self.moneyBid[seat] + 1))
+                return [-1] + list(
+                    range(
+                        self.highestBid + 1, self.money[seat] + self.moneyBid[seat] + 1
+                    )
+                )
         elif self.phase == GamePhase.SELLING_HOUSES:
             assert self.propertyBid[seat] == 0
             return list(self.playerStates[seat].propertyCards)

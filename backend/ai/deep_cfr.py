@@ -402,12 +402,13 @@ def traverse(
                 chance_to_sample,
             )
 
-        payoff_for_action = torch.zeros_like(possible_actions, dtype=torch.float)
+        payoff_for_action = torch.zeros(
+            (possible_actions.size()[0], game.num_players), dtype=torch.float
+        )
         chosen_actions = torch.zeros_like(possible_actions)
         enum_actions = list(enumerate(possible_actions))
         random.shuffle(enum_actions)
         num_chosen = 0
-        expected_value = torch.zeros((game.num_players,), dtype=torch.float)
         for i, a in enum_actions:
             if a == 0:
                 continue
@@ -444,22 +445,30 @@ def traverse(
                     True if first_pass and num_chosen == 0 else False,
                     branch_factor_estimate,
                 )
-                expected_value += value * action_dist.probs[i]
-                payoff_for_action[i] = value[player_to_act]
+                payoff_for_action[i] = value
                 chosen_actions[i] = 1.0
                 num_chosen += 1
         weighted_action_dist = torch.distributions.Categorical(
             action_dist.probs * chosen_actions.float()
         )
-        expected_utility = (payoff_for_action * weighted_action_dist.probs).sum().item()
+        assert payoff_for_action.size()[0] == weighted_action_dist.probs.size()[0]
+        expected_utility = payoff_for_action * weighted_action_dist.probs.unsqueeze(1)
+        assert expected_utility.size() == payoff_for_action.size()
+        expected_utility_over_all_actions = expected_utility.sum(dim=0)
         playerRegret.append(
             (
                 features.unsqueeze(0),
                 chosen_actions.unsqueeze(0),
-                (payoff_for_action - expected_utility).unsqueeze(0),
+                (
+                    payoff_for_action[:, player_to_act]
+                    - expected_utility_over_all_actions[player_to_act]
+                ).unsqueeze(0),
             )
         )
-        return expected_value
+        assert expected_utility_over_all_actions.size() == (game.num_players,), str(
+            expected_utility_over_all_actions.size()
+        )
+        return expected_utility_over_all_actions
     else:
         game.act(player_to_act, int(action_dist.sample().item()))
         return traverse(
@@ -633,7 +642,7 @@ def train(iterations: int, game: GameInterface, output_file: str):
                                 )
                             else:
                                 possible_action_mask = gameState.get_one_hot_actions(
-                                    False
+                                    True
                                 )
                                 action_probs = possible_action_mask.float()
                             action_prob_dist = torch.distributions.Categorical(
