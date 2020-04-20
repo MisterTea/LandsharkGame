@@ -11,327 +11,23 @@ from typing import List, Optional, Tuple
 import pytorch_lightning as pl
 import torch
 
+from ai.expandable_tensor_set import ExpandableTensorSet
+from ai.fully_connected_forward import FullyConnectedForward
+from ai.regret_matching import RegretMatching
 from ai.reservoir_buffer import ReservoirBuffer
 from engine.game import GamePhase, GameState
+from engine.game_interface import GameInterface
 from utils.priority import lowpriority
 from utils.profiler import Profiler
-
-
-class GameInterface:
-    @property
-    def num_players(self):
-        raise NotImplementedError()
-
-    def feature_dim(self):
-        raise NotImplementedError()
-
-    def action_dim(self):
-        raise NotImplementedError()
-
-    def terminal(self):
-        raise NotImplementedError()
-
-    def payoff(self, player):
-        raise NotImplementedError()
-
-    def clone(self):
-        raise NotImplementedError()
-
-    def act(self, player: int, action: int):
-        raise NotImplementedError()
-
-    def populate_features(self, features: torch.Tensor):
-        raise NotImplementedError()
-
-    def get_player_to_act(self) -> int:
-        raise NotImplementedError()
-
-    def get_one_hot_actions(self, hacks) -> torch.Tensor:
-        raise NotImplementedError()
-
-    def reset(self):
-        raise NotImplementedError()
-
-
-class RpsGame(GameInterface):
-    class ActionName(IntEnum):
-        ROCK = 0
-        PAPER = 1
-        SCISSORS = 2
-        LOSE = 3
-
-    def __init__(self):
-        NUM_ACTIONS = len(RpsGame.ActionName)
-
-        self.payoff_matrix = torch.zeros(
-            (NUM_ACTIONS, NUM_ACTIONS, 2), dtype=torch.float
-        )
-
-        for a1 in RpsGame.ActionName:
-            for a2 in RpsGame.ActionName:
-                if (int(a1) + 1) % 3 == int(a2):
-                    self.payoff_matrix[a1, a2, 0] = -1
-                    self.payoff_matrix[a1, a2, 1] = 1
-                    # print(a2, "beats", a1)
-                elif (int(a2) + 1) % 3 == int(a1):
-                    self.payoff_matrix[a1, a2, 0] = 1
-                    self.payoff_matrix[a1, a2, 1] = -1
-                    # print(a1, "beats", a2)
-                else:
-                    self.payoff_matrix[a1, a2, 0] = 0
-                    self.payoff_matrix[a1, a2, 1] = 0
-                    # print(a2, "ties", a1)
-
-                if a1 == RpsGame.ActionName.LOSE and a2 == RpsGame.ActionName.LOSE:
-                    self.payoff_matrix[a1, a2, :] = -10
-                elif a1 == RpsGame.ActionName.LOSE:
-                    self.payoff_matrix[a1, a2, 0] = -10
-                    self.payoff_matrix[a1, a2, 1] = 1
-                elif a2 == RpsGame.ActionName.LOSE:
-                    self.payoff_matrix[a1, a2, 0] = 1
-                    self.payoff_matrix[a1, a2, 1] = -10
-
-        self.reset()
-
-    @property
-    def num_players(self):
-        return 2
-
-    def clone(self):
-        return deepcopy(self)
-
-    def reset(self):
-        self.actions = [-1] * self.num_players
-
-    def action_dim(self):
-        return len(RpsGame.ActionName)
-
-    def terminal(self):
-        return self.get_player_to_act() == -1
-
-    def payoffs(self):
-        return self.payoff_matrix[self.actions[0], self.actions[1]]
-
-    def get_one_hot_actions(self, hacks):
-        return torch.ones((len(RpsGame.ActionName),), dtype=torch.float)
-
-    def populate_features(self, features: torch.Tensor):
-        features.fill_(1.0)
-
-    def feature_dim(self):
-        return 1
-
-    def get_features(self):
-        return torch.ones((self.feature_dim(),), dtype=torch.float)
-
-    def get_player_to_act(self):
-        for i, a in enumerate(self.actions):
-            if a == -1:
-                return i
-        return -1
-
-    def act(self, player: int, action_index: int):
-        assert player == self.get_player_to_act()
-        self.actions[player] = action_index
-
-
-class RegretMatchingForward(torch.nn.Module):
-    def __init__(self, backModule):
-        super().__init__()
-        self.layers = torch.nn.ModuleList([x.cpu() for x in backModule.layers])
-        self.activations = backModule.activations
-        # self.forward = backModule.forward
-
-    def forward(self, inputs):
-        x = inputs
-        for i in range(len(self.layers)):
-            x = self.layers[i](x)
-            if self.activations[i] is not None:
-                x = self.activations[i](x)
-        return x
-
-
-class RegretMatching(pl.LightningModule):
-    def __init__(self, feature_dim: int, action_dim: int):
-        super().__init__()
-        self.layers = torch.nn.ModuleList(
-            [
-                torch.nn.Linear(feature_dim, 128),
-                torch.nn.Linear(128, 64),
-                torch.nn.Linear(64, action_dim),
-            ]
-        )
-        self.activations = torch.nn.ModuleList(
-            [torch.nn.ReLU(), torch.nn.ReLU(), None,]
-        )
-        # self.layers = torch.nn.ModuleList([torch.nn.Linear(feature_dim, action_dim),])
-        # self.activations = torch.nn.ModuleList([None])
-        # self.forward_cache_dict = {}
-
-    def forward_cache(self, inputs):
-        input_key = hashlib.blake2b(inputs.numpy().tobytes()).digest()
-        labels = self.forward_cache_dict.get(input_key, None)
-        if labels is None:
-            x = self.forward(inputs)
-            self.forward_cache_dict[input_key] = x
-            return x
-        else:
-            return labels
-
-    def forward(self, inputs):
-        x = inputs
-        for i in range(len(self.layers)):
-            x = self.layers[i](x)
-            if self.activations[i] is not None:
-                x = self.activations[i](x)
-        return x
-
-    def train_model(
-        self, features, active_labels, labels, model_name, output_file=None
-    ):
-        full_dataset = torch.utils.data.TensorDataset(features, active_labels, labels)
-        dataset_size = len(full_dataset)
-        test_size = dataset_size // 5
-        train_size = dataset_size - test_size
-        self.train_dataset, self.val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, test_size]
-        )
-        print(
-            "TRAINING ON", dataset_size, len(self.train_dataset), len(self.val_dataset)
-        )
-        trainer = pl.Trainer(
-            gpus=1,
-            early_stop_callback=True,
-            max_epochs=1000,
-            default_save_path=os.path.join(os.getcwd(), "models", model_name),
-        )
-        trainer.fit(self)
-        if output_file is not None:
-            trainer.save_checkpoint(output_file)
-        self.train_dataset = self.val_dataset = None
-
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.train_dataset,
-            batch_size=1024,
-            shuffle=True,
-            drop_last=False,
-            pin_memory=True,
-        )
-
-    def val_dataloader(self):
-        return torch.utils.data.DataLoader(
-            self.val_dataset,
-            batch_size=1024 * 1024 * 1024,
-            drop_last=False,
-            pin_memory=True,
-        )
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.01)
-
-    def training_step(self, batch, batch_idx):
-        features, active_labels, labels = batch
-        outputs = self(features) * active_labels.float()
-        criterion = torch.nn.SmoothL1Loss()
-        loss = criterion(outputs, labels)
-        return {"loss": loss}
-
-    def validation_step(self, batch, batch_idx):
-        train_results = self.training_step(batch, batch_idx)
-        return {"val_loss": train_results["loss"]}
-
-    def validation_epoch_end(self, outputs):
-        avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
-        tensorboard_logs = {"val_loss": avg_loss}
-        return {"val_loss": avg_loss, "log": tensorboard_logs}
-
-    def train_model_(self, features, active_labels, labels):
-        self.forward_cache_dict.clear()
-        self.train()
-        regretOptimizer = torch.optim.Adam(self.parameters(), lr=0.001)
-        criterion = torch.nn.SmoothL1Loss()
-        MAX_TRAIN_ITERATIONS = 10000
-        last_loss = 1e10
-        for train_iteration in range(MAX_TRAIN_ITERATIONS):
-            regretOptimizer.zero_grad()
-            train_outputs = (
-                self(features.detach().requires_grad_())
-                * active_labels.detach().requires_grad_()
-            )
-            # assert (labels[active_labels == 0]).sum() < 1e-6
-            loss = criterion(train_outputs, labels)
-            if train_iteration % (MAX_TRAIN_ITERATIONS // 10) == 0:
-                pass
-                # print("Train loss", loss.item())
-            loss.backward()
-            regretOptimizer.step()
-            if abs(last_loss - loss.item()) < 1e-7 and train_iteration > 1000:
-                print("Stopped after", train_iteration, "iterations")
-                break
-            last_loss = loss.item()
-        print("Train loss", loss.item())
-        self.eval()
-
-
-class TensorData:
-    def __init__(self, capacity: int, dims: List[int]):
-        self.filled = 0
-        self.features = torch.zeros((capacity, dims[0]), dtype=torch.float)
-        self.active_labels = torch.zeros((capacity, dims[1]), dtype=torch.float)
-        self.labels = torch.zeros((capacity, dims[2]), dtype=torch.float)
-
-    @property
-    def capacity(self):
-        return self.features.size()[0]
-
-    def append(self, tensors: List[torch.Tensor]):
-        features, active_labels, labels = tensors
-        assert len(features.size()) == 2
-        assert len(active_labels.size()) == 2
-        assert len(labels.size()) == 2
-        num_new_features = features.size()[0]
-        while (self.filled + num_new_features) > self.features.size()[0]:
-            self.features = torch.cat(
-                (self.features, torch.zeros_like(self.features)), dim=0
-            )
-            self.active_labels = torch.cat(
-                (self.active_labels, torch.zeros_like(self.active_labels)), dim=0
-            )
-            self.labels = torch.cat((self.labels, torch.zeros_like(self.labels)), dim=0)
-            print("Expanding training data to", self.features.size()[0])
-        self.features[self.filled : self.filled + num_new_features] = features
-        if active_labels is not None:
-            self.active_labels[
-                self.filled : self.filled + num_new_features
-            ] = active_labels
-        self.labels[self.filled : self.filled + num_new_features] = labels
-        self.filled += num_new_features
-
-    def cat(self, other):
-        self.append(other.features, other.active_labels, other.labels)
-
-    def getFilled(self):
-        return (
-            self.features[0 : self.filled],
-            self.active_labels[0 : self.filled],
-            self.labels[0 : self.filled],
-        )
-
-    def reset(self):
-        self.filled = 0
-        self.features.fill_(0.0)
-        self.labels.fill_(0.0)
-        self.active_labels.fill_(0.0)
 
 
 def traverse(
     game: GameInterface,
     player_to_train: int,
-    regretModels: List[Optional[RegretMatchingForward]],
-    playerRegret: TensorData,
-    strategyModels: List[Optional[RegretMatchingForward]],
-    strategyData: TensorData,
+    regretModels: List[Optional[FullyConnectedForward]],
+    playerRegret: ExpandableTensorSet,
+    strategyModels: List[Optional[FullyConnectedForward]],
+    strategyData: ExpandableTensorSet,
     metrics: Counter,
     level: int,
     first_pass: bool,
@@ -356,21 +52,28 @@ def traverse(
         strategy = possible_actions.float()
         active_sampling_chances = None
     else:
-        model_regrets = model.forward(features.unsqueeze(0))[0]
-        model_probs = model_regrets.clamp(min=1e-6) * possible_actions.float()
+        assert strategyModels[player_to_act] is not None
+        model_regrets = model.forward_cache(features.unsqueeze(0))[0]
+        model_probs = model_regrets.clamp(min=1e-3) * possible_actions.float()
         strategy = model_probs
         active_sampling_chances = (
-            strategyModels[player_to_act].forward(features.unsqueeze(0))[0]
+            strategyModels[player_to_act]  # type: ignore
+            .forward(features.unsqueeze(0))[0]
+            .clamp(min=1e-3)
             * possible_actions.float()
         )
         active_sampling_chances_sum = float(active_sampling_chances.sum().item())
 
     action_dist = torch.distributions.Categorical(strategy)
+    if action_dist.probs.min() < 0 or action_dist.probs.max() == 0:
+        print("Invalid action dist:", action_dist.probs)
+    if strategy.min() < 0 or strategy.max() == 0:
+        print("Invalid strategy:", strategy)
 
     chance_to_sample = (
         1.0
-        if level == 0
-        else 1.0 - (1.0 / (20.0 ** (1.0 / ((level) ** branch_factor_estimate))))
+        if level < 2
+        else 1.0 - (1.0 / (100.0 ** (1.0 / ((level) ** branch_factor_estimate))))
     )
     do_sample = random.random() < chance_to_sample
 
@@ -417,8 +120,8 @@ def traverse(
 
             # Active sampling: https://papers.nips.cc/paper/4569-efficient-monte-carlo-counterfactual-regret-minimization-in-games-with-many-player-actions.pdf
             EPSILON = 0.05
-            BONUS = 1000000
-            THRESHOLD = 1000
+            BONUS = 1e-6
+            THRESHOLD = 1
             if active_sampling_chances is None:
                 # Do Outcome sampling for the first iteration
                 as_pass = num_chosen == 0
@@ -432,7 +135,7 @@ def traverse(
             if level == 0:
                 # Do external sampling for the game tree root
                 as_pass = True
-            if random.random() < EPSILON or as_pass:
+            if True or i == 0 or random.random() < EPSILON or as_pass:
                 value = traverse(
                     g,
                     player_to_train,
@@ -490,14 +193,14 @@ def start_traverse(
     player_to_train: int,
     regretModels: List[Optional[RegretMatching]],
     strategyModels: List[Optional[RegretMatching]],
-) -> Tuple[int, TensorData, TensorData, Counter]:
+) -> Tuple[int, ExpandableTensorSet, ExpandableTensorSet, Counter]:
     lowpriority()
     NUM_INNER_GAME_ITERATIONS = 100
     with torch.no_grad():
-        playerRegret = TensorData(
+        playerRegret = ExpandableTensorSet(
             16 * 1024, (game.feature_dim(), game.action_dim(), game.action_dim())
         )
-        strategyData = TensorData(
+        strategyData = ExpandableTensorSet(
             16 * 1024, (game.feature_dim(), game.action_dim(), game.action_dim())
         )
         metrics: Counter = Counter()
@@ -551,7 +254,7 @@ def train(iterations: int, game: GameInterface, output_file: str):
                         None
                     )
 
-                    regretForwardModel = RegretMatchingForward(regretModel)
+                    regretForwardModel = FullyConnectedForward(regretModel)
                     torch.save(regretForwardModel, "test.model")
                     # Throw away the data from the last iteration
                     # playerRegrets[player].reset()
@@ -562,7 +265,7 @@ def train(iterations: int, game: GameInterface, output_file: str):
                     stratModel.train_model(
                         features, active_labels, labels, "strategy_" + str(player), None
                     )
-                    stratModels.append(RegretMatchingForward(stratModel))
+                    stratModels.append(FullyConnectedForward(stratModel))
             else:
                 # Begin with random strategies
                 for _ in range(game.num_players):
@@ -607,7 +310,7 @@ def train(iterations: int, game: GameInterface, output_file: str):
                 stratModel.train_model(
                     features, active_labels, labels, "strategy", None
                 )
-                bestStrategy = RegretMatchingForward(stratModel)
+                bestStrategy = FullyConnectedForward(stratModel)
                 # print(
                 #     "Learned Strategy at " + str(iteration) + ": ", str(bestStrategy),
                 # )

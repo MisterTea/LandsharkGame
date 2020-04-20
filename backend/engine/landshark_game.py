@@ -9,18 +9,24 @@ from uuid import UUID, uuid4
 import numpy as np
 import torch
 
-from engine.player import PlayerState
+from engine.game_interface import GameInterface
+
+
+class PlayerState:
+    __slots__ = [
+        "propertyCards",
+        "dollarCards",
+    ]
+
+    def __init__(self):
+        self.propertyCards = []
+        self.dollarCards = []
 
 
 class GamePhase(IntEnum):
     BUYING_HOUSES = 1
     SELLING_HOUSES = 2
     GAME_OVER = 3
-
-
-class GameInterface:
-    def action_dim(self):
-        raise NotImplementedError()
 
 
 class GameState:
@@ -186,7 +192,7 @@ class GameState:
         return actions_one_hot
 
     def feature_dim(self):
-        return 77
+        return 31 + 17 + (47 * self.num_players)
 
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
@@ -194,24 +200,47 @@ class GameState:
 
     def populate_features(self, features: torch.Tensor):
         player_index = self.get_player_to_act()
-        player = self.playerStates[player_index]
         cursor = 0
+
         if self.phase == GamePhase.BUYING_HOUSES:
-            features[cursor] = int(self.money[player_index])
+            features[cursor] = (30 - self.onPropertyCard) // self.num_players
             cursor += 1
+
             t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
             features[cursor + (t - 1)] = 1.0
             cursor += 30
         else:
             cursor += 31
+
         if self.phase == GamePhase.SELLING_HOUSES:
+            features[cursor] = (30 - self.onDollarCard) // self.num_players
+            cursor += 1
+
             t = torch.tensor(self.getDollarsOnAuction())
             dollars, counts = torch.unique(t, return_counts=True)
             features[dollars.long() + cursor] = counts.float()
             cursor += 16
+        else:
+            cursor += 17
+
+        while True:
+            player = self.playerStates[player_index]
+
+            features[cursor] = int(self.money[player_index])
+            cursor += 1
+
             t = torch.tensor(player.propertyCards, dtype=torch.long)
             features[cursor + (t - 1)] = 1.0
             cursor += 30
+
+            t = torch.tensor(player.dollarCards, dtype=torch.long)
+            # There is a 0-dollar card so we need 16 spaces
+            features[cursor + t] += 1.0
+            cursor += 16
+
+            player_index = (player_index + 1) % self.num_players
+            if player_index == self.get_player_to_act():
+                break
 
         return features
 
