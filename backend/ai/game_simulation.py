@@ -26,7 +26,7 @@ def traverse(
                 (level, game.action_dim()), dtype=torch.long
             ),  # Possible Actions
             torch.zeros((level, 1), dtype=torch.long),  # Player to act
-            game.payoffs().float().repeat((level, 1)),  # Payoffs
+            game.absolute_payoffs().float().repeat((level, 1)),  # Payoffs
             torch.arange(level - 1, -1, -1, dtype=torch.float).unsqueeze(
                 1
             ),  # Distance to payoff
@@ -100,13 +100,15 @@ class GameSimulationIterator(Thread):
         return self
 
     def start_game(self):
+        if self.on_iter == self.max_games:
+            return
         self.on_game += 1
         # print("Starting", self.on_game)
         ng = self.game.clone()
         ng.reset()
         with Profiler(False):
             metrics = Counter()
-            if self.policy_network.num_steps >= 10:
+            if self.policy_network.num_steps >= 100:
                 eval_net = copy.deepcopy(self.policy_network).cpu().eval()
             else:
                 eval_net = None

@@ -155,13 +155,20 @@ class GameState:
     def terminal(self):
         return self.phase == GamePhase.GAME_OVER
 
-    def payoffs(self):
-        absolute_payoff = torch.tensor(
+    def absolute_payoffs(self):
+        absolute_payoffs = torch.tensor(
             [float(self.getScore(i)) for i in range(self.num_players)]
         )
-        places = torch.sort(absolute_payoff)[1]
-        payoff = torch.zeros_like(absolute_payoff)
-        scores = torch.tensor([-8.0, -2.0, 2.0, 8.0])
+        return absolute_payoffs
+
+    def payoffs(self):
+        absolute_payoffs = self.absolute_payoffs()
+        places = torch.sort(absolute_payoffs)[1]
+        payoff = torch.zeros_like(absolute_payoffs)
+        if self.num_players == 3:
+            scores = torch.tensor([-8.0, 0.0, 8.0])
+        elif self.num_players == 4:
+            scores = torch.tensor([-8.0, -2.0, 2.0, 8.0])
         for index, place in enumerate(places):
             payoff[place] = scores[index]
         return payoff
@@ -192,7 +199,8 @@ class GameState:
         return actions_one_hot
 
     def feature_dim(self):
-        return 31 + 17 + (47 * self.num_players)
+        # return 31 + 17 + (47 * self.num_players)
+        return 6 + (4 * self.num_players)
 
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
@@ -206,42 +214,62 @@ class GameState:
             features[cursor] = (30 - self.onPropertyCard) // self.num_players
             cursor += 1
 
-            t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
-            features[cursor + (t - 1)] = 1.0
-            cursor += 30
+            p = self.getPropertyOnAuction()
+            features[cursor] = float(p[0])
+            features[cursor + 1] = float(p[-1])
+            cursor += 2
+
+            # t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
+            # features[cursor + (t - 1)] = 1.0
+            # cursor += 30
         else:
-            cursor += 31
+            cursor += 3
 
         if self.phase == GamePhase.SELLING_HOUSES:
             features[cursor] = (30 - self.onDollarCard) // self.num_players
             cursor += 1
 
-            t = torch.tensor(self.getDollarsOnAuction())
-            dollars, counts = torch.unique(t, return_counts=True)
-            features[dollars.long() + cursor] = counts.float()
-            cursor += 16
+            d = self.getDollarsOnAuction()
+            features[cursor] = float(d[0])
+            features[cursor + 1] = float(d[-1])
+            cursor += 2
+
+            # t = torch.tensor(d)
+            # dollars, counts = torch.unique(t, return_counts=True)
+            # features[dollars.long() + cursor] = counts.float()
+            # cursor += 16
         else:
-            cursor += 17
+            cursor += 3
 
         while True:
+            # print("On Player", player_index)
             player = self.playerStates[player_index]
 
             features[cursor] = int(self.money[player_index])
             cursor += 1
 
-            t = torch.tensor(player.propertyCards, dtype=torch.long)
-            features[cursor + (t - 1)] = 1.0
-            cursor += 30
+            # t = torch.tensor(player.propertyCards, dtype=torch.long)
+            # features[cursor + (t - 1)] = 1.0
+            # cursor += 30
 
-            t = torch.tensor(player.dollarCards, dtype=torch.long)
-            # There is a 0-dollar card so we need 16 spaces
-            features[cursor + t] += 1.0
-            cursor += 16
+            if len(player.propertyCards) > 0:
+                features[cursor] = float(min(player.propertyCards))
+                features[cursor + 1] = float(max(player.propertyCards))
+            cursor += 2
+
+            if len(player.dollarCards) > 0:
+                features[cursor] = float(
+                    sum(player.dollarCards) + int(self.money[player_index])
+                )
+            cursor += 1
 
             player_index = (player_index + 1) % self.num_players
             if player_index == self.get_player_to_act():
                 break
 
+        assert (
+            cursor <= self.feature_dim()
+        ), f"Too many features: {cursor} {self.feature_dim()}"
         return features
 
     def get_player_to_act(self):

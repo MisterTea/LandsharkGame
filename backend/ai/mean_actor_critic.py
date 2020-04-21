@@ -74,9 +74,13 @@ class ActorCritic(torch.nn.Module):
             x = self.actor_layers[i](x)
             x = self.actor_activations[i](x)
         x = masked_softmax(x, possible_actions, 0.1)
+        epsilon_prob = possible_actions * (
+            0.1 / possible_actions.sum(dim=1, keepdim=True).float()
+        )
+        assert epsilon_prob.size() == x.size()
         for _ in range(5):
-            x = x.clamp(min=0.1) * possible_actions
-            x /= x.sum(dim=1, keepdim=True)
+            x = torch.max(x, epsilon_prob)
+            x = x / x.sum(dim=1, keepdim=True)
         actor_probs = x
 
         return actor_probs, critic_action_values
@@ -94,37 +98,56 @@ class ActorCritic(torch.nn.Module):
             .sum(dim=1, keepdim=True)
             .type_as(batch.states)
         )
-        num_levels = batch.actions.size()[0]
+        batch_size = batch.actions.size()[0]
         labels = (0.99 ** batch.distance_to_payoff) * player_to_act_one_hot
-        assert labels.size() == (num_levels, 1)
+        assert labels.size() == (batch_size, 1)
         labels = (labels * action_one_hot).sum(dim=1, keepdim=True)
         assert action_one_hot.size() == batch.possible_actions.size()
 
         actor_probs, critic_action_values = self(batch.states, batch.possible_actions)
+        total_prob = actor_probs.sum(dim=1)
 
         outputs = (critic_action_values * action_one_hot).sum(dim=1, keepdim=True)
-        criterion = torch.nn.SmoothL1Loss()
+        criterion = torch.nn.SmoothL1Loss(reduction="mean")
         critic_loss = criterion(outputs, labels)
         # print("Critic loss", critic_loss)
 
-        if critic_loss < 3:
+        if self.num_steps >= 100:
+            detached_critic = critic_action_values.detach()
             assert critic_action_values.size() == batch.possible_actions.size()
-            baseline = (actor_probs * critic_action_values).sum(dim=1, keepdim=True)
-            advantage = critic_action_values - baseline
-            loss = -1 * (actor_probs * advantage.detach()).sum(dim=1, keepdim=True)
-            # loss = torch.nn.ReLU()(advantage).sum(dim=1, keepdim=True)
-            loss = loss.mean()
-            actor_loss = loss
-            # print("Actor loss", actor_loss)
-            self.num_steps += 1
+            # baseline = (actor_probs * detached_critic).sum(dim=1, keepdim=True)
+            # advantage = detached_critic - baseline
+            # advantage_loss = -1 * (actor_probs * advantage.detach()).sum(
+            #     dim=1, keepdim=True
+            # )
+            advantage_loss = -1 * (actor_probs * detached_critic).sum(
+                dim=1, keepdim=True
+            )
+            # advantage_loss = torch.nn.LeakyReLU()(advantage).sum(dim=1, keepdim=True)
+            advantage_loss = advantage_loss.mean()
+
+            entropy_loss = 1.0 * torch.mean(
+                torch.sum(
+                    -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
+                    dim=1,
+                    keepdim=True,
+                )
+            )
+
+            actor_loss = advantage_loss + entropy_loss
+            # print("Actor losses", loss, entropy_loss)
         else:
             # Don't bother training actor while critic is so wrong
-            actor_loss = 0
+            actor_loss = advantage_loss = entropy_loss = 0
 
+        self.num_steps += 1
         return {
+            "progress_bar": {
+                "advantage_loss": advantage_loss,
+                "entropy_loss": entropy_loss,
+                "critic_loss": critic_loss,
+            },
             "loss": actor_loss + critic_loss,
-            "actor_loss": actor_loss,
-            "critic_loss": critic_loss,
         }
 
 
@@ -161,8 +184,9 @@ class TorchSaveCallback(pl.Callback):
                         action_probs * possible_action_mask
                     )
                     action_index = int(action_prob_dist.sample().item())
-                    average_decision[action_index] += 1.0
-                    num_decisions += 1
+                    if seatToAct == 0:
+                        average_decision[action_index] += 1.0
+                        num_decisions += 1
                     gameState.act(seatToAct, action_index)
                 payoffs = gameState.payoffs()
                 for i, p in enumerate(payoffs):
@@ -190,9 +214,10 @@ class MeanActorCritic(pl.LightningModule):
             # show_progress_bar=False,
             max_epochs=10000,
             default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
-            val_check_interval=100,
+            val_check_interval=1000,
             callbacks=[TorchSaveCallback()],
         )
+        trainer.disable_validation = True
         trainer.fit(self)
         if output_file is not None:
             trainer.save_checkpoint(output_file)
@@ -202,7 +227,9 @@ class MeanActorCritic(pl.LightningModule):
         return torch.utils.data.DataLoader(self.train_dataset, pin_memory=True,)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.actor_critic.parameters(), lr=0.01)
+        return torch.optim.Adam(
+            self.actor_critic.parameters(), lr=0.001, weight_decay=0.01
+        )
 
     def training_step(self, batch, batch_idx):
         return self.actor_critic.training_step(batch, batch_idx)
