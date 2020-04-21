@@ -26,7 +26,7 @@ def traverse(
                 (level, game.action_dim()), dtype=torch.long
             ),  # Possible Actions
             torch.zeros((level, 1), dtype=torch.long),  # Player to act
-            game.absolute_payoffs().float().repeat((level, 1)),  # Payoffs
+            game.payoffs().float().repeat((level, 1)),  # Payoffs
             torch.arange(level - 1, -1, -1, dtype=torch.float).unsqueeze(
                 1
             ),  # Distance to payoff

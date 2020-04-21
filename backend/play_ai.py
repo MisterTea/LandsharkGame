@@ -2,13 +2,12 @@ import random
 
 import torch
 
-from ai.deep_cfr import RegretMatching
-from engine.game import GamePhase, GameState
+from engine.landshark_game import GamePhase, GameState
 
 if __name__ == "__main__":
     tmpgs = GameState(4)
     # policy = RegretMatching.load_from_checkpoint("LandsharkAi.torch", feature_dim=tmpgs.feature_dim(), action_dim=tmpgs.action_dim())
-    policy = torch.load("LandsharkAi.torch")
+    policy = torch.load("MAC_ActorCritic.torch").cpu().eval()
     print(policy)
     random.seed(1)
     for x in range(1000):
@@ -28,14 +27,10 @@ if __name__ == "__main__":
                 gameState.playerAction(seatToAct, action)
             else:
                 gameState.populate_features(features[0])
-                action_probs = policy(features).detach()[0]
                 possible_action_mask = gameState.get_one_hot_actions(True)
+                action_probs = policy(features, possible_action_mask.unsqueeze(0))[0]
                 action_index = int(
-                    torch.distributions.Categorical(
-                        torch.nn.Softmax(dim=0)(action_probs) * possible_action_mask
-                    )
-                    .sample()
-                    .item()
+                    torch.distributions.Categorical(action_probs).sample().item()
                 )
                 gameState.act(seatToAct, action_index)
         for i, player in enumerate(gameState.playerStates):
