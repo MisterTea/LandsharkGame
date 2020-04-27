@@ -87,6 +87,8 @@ class ActorCritic(torch.nn.Module):
 
     def training_step(self, batch_list: List[torch.Tensor], batch_idx):
         batch = GameRollout(*[x[0] for x in batch_list])
+        actor_probs, critic_action_values = self(batch.states, batch.possible_actions)
+
         action_one_hot = torch.nn.functional.one_hot(
             batch.actions.squeeze(1), num_classes=self.action_dim
         ).type_as(batch.states)
@@ -104,7 +106,6 @@ class ActorCritic(torch.nn.Module):
         labels = (labels * action_one_hot).sum(dim=1, keepdim=True)
         assert action_one_hot.size() == batch.possible_actions.size()
 
-        actor_probs, critic_action_values = self(batch.states, batch.possible_actions)
         total_prob = actor_probs.sum(dim=1)
 
         outputs = (critic_action_values * action_one_hot).sum(dim=1, keepdim=True)
@@ -120,9 +121,17 @@ class ActorCritic(torch.nn.Module):
             # advantage_loss = -1 * (actor_probs * advantage.detach()).sum(
             #     dim=1, keepdim=True
             # )
-            advantage_loss = -1 * (actor_probs * detached_critic).sum(
-                dim=1, keepdim=True
+
+            # Some actions are impossible, these will get an importance weight of 0
+            importance_weight = (actor_probs / batch.policy.clamp(min=1e-6)).clamp(
+                max=10.0
             )
+            assert (
+                torch.isnan(importance_weight).sum() == 0
+            ), "Invalid importance weight"
+            advantage_loss = -1 * (
+                importance_weight.detach() * actor_probs * detached_critic
+            ).sum(dim=1, keepdim=True)
             # advantage_loss = torch.nn.LeakyReLU()(advantage).sum(dim=1, keepdim=True)
             advantage_loss = advantage_loss.mean()
 
@@ -153,59 +162,70 @@ class ActorCritic(torch.nn.Module):
 
 class TorchSaveCallback(pl.Callback):
     def on_epoch_end(self, trainer, pl_module):
-        torch.save(pl_module.actor_critic, "MAC_ActorCritic.torch")
-        game = pl_module.game
-        actor = copy.deepcopy(pl_module.actor_critic).cpu().eval()
+        for i, actor_critic in enumerate(pl_module.actor_critics):
+            torch.save(actor_critic, f"MAC_ActorCritic_{i}.torch")
+            game = pl_module.game
+            actor = copy.deepcopy(actor_critic).cpu().eval()
 
-        with torch.no_grad():
-            # Check winrate against random player
-            scoreCounter: Counter = Counter()
-            NUM_RANDOM_GAMES = 1000
-            num_decisions = 0
-            average_decision = torch.zeros((game.action_dim(),), dtype=torch.float)
-            for on_game in range(NUM_RANDOM_GAMES):
-                gameState = game.clone()
-                gameState.reset()
-                features = torch.zeros((1, gameState.feature_dim()), dtype=torch.float)
-                while (
-                    not gameState.terminal()
-                ):  # gameState.phase != GamePhase.GAME_OVER:
-                    seatToAct = gameState.get_player_to_act()
-                    if seatToAct == 0:
-                        possible_action_mask = gameState.get_one_hot_actions(True)
-                        gameState.populate_features(features[0])
-                        action_probs = actor(
-                            features, possible_action_mask.unsqueeze(0)
-                        )[0]
-                    else:
-                        possible_action_mask = gameState.get_one_hot_actions(True)
-                        action_probs = possible_action_mask.float()
-                    action_prob_dist = torch.distributions.Categorical(
-                        action_probs * possible_action_mask
+            with torch.no_grad():
+                # Check winrate against random player
+                scoreCounter: Counter = Counter()
+                NUM_RANDOM_GAMES = 1000
+                num_decisions = 0
+                average_decision = torch.zeros((game.action_dim(),), dtype=torch.float)
+                for on_game in range(NUM_RANDOM_GAMES):
+                    gameState = game.clone()
+                    gameState.reset()
+                    features = torch.zeros(
+                        (1, gameState.feature_dim()), dtype=torch.float
                     )
-                    action_index = int(action_prob_dist.sample().item())
-                    if seatToAct == 0:
-                        average_decision[action_index] += 1.0
-                        num_decisions += 1
-                    gameState.act(seatToAct, action_index)
-                payoffs = gameState.payoffs()
-                for i, p in enumerate(payoffs):
-                    scoreCounter[str(i)] += p
-            print("DECISION HISTOGRAM")
-            print(average_decision / num_decisions)
-            print("SCORE AGAINST RANDOM")
-            for x in range(gameState.num_players):
-                print(x, scoreCounter[str(x)] / float(NUM_RANDOM_GAMES))
+                    while (
+                        not gameState.terminal()
+                    ):  # gameState.phase != GamePhase.GAME_OVER:
+                        seatToAct = gameState.get_player_to_act()
+                        if seatToAct == 0:
+                            possible_action_mask = gameState.get_one_hot_actions(True)
+                            gameState.populate_features(features[0])
+                            action_probs = actor(
+                                features, possible_action_mask.unsqueeze(0)
+                            )[0]
+                        else:
+                            possible_action_mask = gameState.get_one_hot_actions(True)
+                            action_probs = possible_action_mask.float()
+                        action_prob_dist = torch.distributions.Categorical(
+                            action_probs * possible_action_mask
+                        )
+                        action_index = int(action_prob_dist.sample().item())
+                        if seatToAct == 0:
+                            average_decision[action_index] += 1.0
+                            num_decisions += 1
+                        gameState.act(seatToAct, action_index)
+                    payoffs = gameState.payoffs()
+                    for i, p in enumerate(payoffs):
+                        scoreCounter[str(i)] += p
+                print("DECISION HISTOGRAM")
+                print(average_decision / num_decisions)
+                print("SCORE AGAINST RANDOM")
+                for x in range(gameState.num_players):
+                    print(x, scoreCounter[str(x)] / float(NUM_RANDOM_GAMES))
+
+
+NUM_PARALLEL_MODELS = 1
 
 
 class MeanActorCritic(pl.LightningModule):
     def __init__(self, game: GameInterface):
         super().__init__()
         self.game = game
-        self.actor_critic = ActorCritic(game.feature_dim(), game.action_dim())
+        self.actor_critics = torch.nn.ModuleList(
+            [
+                ActorCritic(game.feature_dim(), game.action_dim())
+                for _ in range(NUM_PARALLEL_MODELS)
+            ]
+        )
 
     def forward(self, inputs):
-        self.actor_critic.forward(inputs)
+        self.actor_critics[0].forward(inputs)
 
     def train_model(self, train_dataset, output_file=None):
         self.train_dataset = train_dataset
@@ -227,9 +247,13 @@ class MeanActorCritic(pl.LightningModule):
         return torch.utils.data.DataLoader(self.train_dataset, pin_memory=True,)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(
-            self.actor_critic.parameters(), lr=0.001, weight_decay=0.01
+        return (
+            [
+                torch.optim.Adam(x.parameters(), lr=0.1, weight_decay=0.01)
+                for x in self.actor_critics
+            ],
+            [],
         )
 
-    def training_step(self, batch, batch_idx):
-        return self.actor_critic.training_step(batch, batch_idx)
+    def training_step(self, batch, batch_idx, optimizer_idx):
+        return self.actor_critics[optimizer_idx].training_step(batch, batch_idx)

@@ -11,3 +11,4 @@ class GameRollout:
     player_to_act: torch.Tensor
     payoffs: torch.Tensor
     distance_to_payoff: torch.Tensor
+    policy: torch.Tensor

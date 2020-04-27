@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
 import copy
-import multiprocessing
+import random
 import time
 from collections import Counter
 from threading import Thread
 from typing import List
 
 import torch
+from torch import multiprocessing
 from torch.utils.data import IterableDataset
 
 from ai.types import GameRollout
@@ -15,6 +16,7 @@ from engine.game_interface import GameInterface
 from utils.profiler import Profiler
 
 
+@torch.no_grad()
 def traverse(
     game: GameInterface, policy_network, metrics: Counter, level: int,
 ) -> GameRollout:
@@ -30,6 +32,7 @@ def traverse(
             torch.arange(level - 1, -1, -1, dtype=torch.float).unsqueeze(
                 1
             ),  # Distance to payoff
+            torch.zeros((level, game.action_dim()), dtype=torch.float),  # Policy
         )
         return gr
 
@@ -69,6 +72,7 @@ def traverse(
         result.actions[level] = action_taken
         result.player_to_act[level] = player_to_act
         result.possible_actions[level] = possible_actions
+        result.policy[level] = strategy
     else:
         # Don't advance the level, skip this non-choice
         result = traverse(game, policy_network, metrics, level,)
@@ -79,11 +83,11 @@ NUM_PARALLEL_GAMES = 8
 
 
 class GameSimulationIterator(Thread):
-    def __init__(self, game: GameInterface, max_games: int, policy_network, pool):
+    def __init__(self, game: GameInterface, max_games: int, policy_networks, pool):
         super().__init__()
         self.on_game = 0
         self.game = game.clone()
-        self.policy_network = policy_network
+        self.policy_networks = policy_networks
         self.max_games = max_games
         self.pool = pool
         self.results = []
@@ -108,8 +112,9 @@ class GameSimulationIterator(Thread):
         ng.reset()
         with Profiler(False):
             metrics = Counter()
-            if self.policy_network.num_steps >= 100:
-                eval_net = copy.deepcopy(self.policy_network).cpu().eval()
+            policy_network = random.choice(self.policy_networks)
+            if policy_network.num_steps >= 100:
+                eval_net = copy.deepcopy(policy_network).cpu().eval()
             else:
                 eval_net = None
             self.pool.apply_async(
@@ -119,6 +124,7 @@ class GameSimulationIterator(Thread):
     def finish_game(self, gr):
         self.results.append(gr)
         self.start_game()
+        # print("game ended")
 
     def run(self):
         while self.on_game + len(self.results) + len(self.futures) < self.max_games:
@@ -141,6 +147,7 @@ class GameSimulationIterator(Thread):
         player_to_act = torch.cat([gr.player_to_act for gr in r])
         payoffs = torch.cat([gr.payoffs for gr in r])
         distance_to_payoff = torch.cat([gr.distance_to_payoff for gr in r])
+        policy = torch.cat([gr.policy for gr in r])
 
         return (
             states,
@@ -149,19 +156,20 @@ class GameSimulationIterator(Thread):
             player_to_act,
             payoffs,
             distance_to_payoff,
+            policy,
         )
 
 
 class GameSimulationDataset(IterableDataset):
-    def __init__(self, game: GameInterface, max_games: int, policy_network):
+    def __init__(self, game: GameInterface, max_games: int, policy_networks):
         self.max_games = max_games
         self.game = game.clone()
-        self.policy_network = policy_network
+        self.policy_networks = policy_networks
         self.pool = multiprocessing.Pool(NUM_PARALLEL_GAMES)
 
     def __iter__(self) -> GameSimulationIterator:
         gsi = GameSimulationIterator(
-            self.game, self.max_games, self.policy_network, self.pool
+            self.game, self.max_games, self.policy_networks, self.pool
         )
         return gsi
 

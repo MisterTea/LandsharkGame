@@ -9,6 +9,5 @@ if __name__ == "__main__":
     # policy = train(100, GameState(4), "LandsharkAi.torch")
     game = GameState(4)
     mac = MeanActorCritic(game)
-    train_dataset = GameSimulationDataset(game, 1000, mac.actor_critic)
-    torch.save(mac.actor_critic, "MAC_ActorCritic.torch")
+    train_dataset = GameSimulationDataset(game, 1000, mac.actor_critics)
     mac.train_model(train_dataset)

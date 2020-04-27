@@ -200,7 +200,7 @@ class GameState:
 
     def feature_dim(self):
         # return 31 + 17 + (47 * self.num_players)
-        return 6 + (4 * self.num_players)
+        return 6 + 30 + 16 + (4 * self.num_players)
 
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
@@ -219,11 +219,11 @@ class GameState:
             features[cursor + 1] = float(p[-1])
             cursor += 2
 
-            # t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
-            # features[cursor + (t - 1)] = 1.0
-            # cursor += 30
+            t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
+            features[cursor + (t - 1)] = 1.0
+            cursor += 30
         else:
-            cursor += 3
+            cursor += 33
 
         if self.phase == GamePhase.SELLING_HOUSES:
             features[cursor] = (30 - self.onDollarCard) // self.num_players
@@ -234,12 +234,12 @@ class GameState:
             features[cursor + 1] = float(d[-1])
             cursor += 2
 
-            # t = torch.tensor(d)
-            # dollars, counts = torch.unique(t, return_counts=True)
-            # features[dollars.long() + cursor] = counts.float()
-            # cursor += 16
+            t = torch.tensor(d)
+            dollars, counts = torch.unique(t, return_counts=True)
+            features[dollars.long() + cursor] = counts.float()
+            cursor += 16
         else:
-            cursor += 3
+            cursor += 19
 
         while True:
             # print("On Player", player_index)
@@ -258,9 +258,10 @@ class GameState:
             cursor += 2
 
             if len(player.dollarCards) > 0:
-                features[cursor] = float(
-                    sum(player.dollarCards) + int(self.money[player_index])
+                features[cursor] = float(sum(player.dollarCards)) + int(
+                    self.money[player_index]
                 )
+
             cursor += 1
 
             player_index = (player_index + 1) % self.num_players
