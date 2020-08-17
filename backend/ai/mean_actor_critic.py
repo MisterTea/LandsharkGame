@@ -33,17 +33,22 @@ class ActorCritic(torch.nn.Module):
         super().__init__()
         self.feature_dim = feature_dim
         self.action_dim = action_dim
-        self.shared_layers = torch.nn.ModuleList(
-            [torch.nn.Linear(feature_dim, 128), torch.nn.Linear(128, 64),]
-        )
-        self.shared_activations = torch.nn.ModuleList(
-            [torch.nn.ReLU(), torch.nn.ReLU(),]
+        self.shared = torch.nn.ModuleList(
+            [
+                torch.nn.BatchNorm1d(feature_dim),
+                (torch.nn.Linear(feature_dim, 128)),
+                torch.nn.LeakyReLU(),
+                torch.nn.BatchNorm1d(128),
+                (torch.nn.Linear(128, 64)),
+                torch.nn.LeakyReLU(),
+                torch.nn.BatchNorm1d(64),
+            ]
         )
 
-        self.critic_layers = torch.nn.ModuleList([torch.nn.Linear(64, action_dim),])
+        self.critic_layers = torch.nn.ModuleList([(torch.nn.Linear(64, action_dim)),])
         self.critic_activations = torch.nn.ModuleList([torch.nn.Identity(),])
 
-        self.actor_layers = torch.nn.ModuleList([torch.nn.Linear(64, action_dim),])
+        self.actor_layers = torch.nn.ModuleList([(torch.nn.Linear(64, action_dim)),])
         self.actor_activations = torch.nn.ModuleList([torch.nn.Identity(),])
 
         self.num_steps = 0
@@ -57,9 +62,8 @@ class ActorCritic(torch.nn.Module):
 
     def forward(self, inputs, possible_actions):
         x = inputs
-        for i in range(len(self.shared_layers)):
-            x = self.shared_layers[i](x)
-            x = self.shared_activations[i](x)
+        for i in range(len(self.shared)):
+            x = self.shared[i](x)
 
         shared_result = x
         # Critic
@@ -92,7 +96,7 @@ class ActorCritic(torch.nn.Module):
         action_one_hot = torch.nn.functional.one_hot(
             batch.actions.squeeze(1), num_classes=self.action_dim
         ).type_as(batch.states)
-        player_to_act_one_hot = (
+        payoff_for_player_to_act = (
             (
                 batch.payoffs
                 * torch.nn.functional.one_hot(batch.player_to_act.squeeze(1))
@@ -101,7 +105,8 @@ class ActorCritic(torch.nn.Module):
             .type_as(batch.states)
         )
         batch_size = batch.actions.size()[0]
-        labels = (0.99 ** batch.distance_to_payoff) * player_to_act_one_hot
+        # labels = (0.99 ** batch.distance_to_payoff) * payoff_for_player_to_act
+        labels = payoff_for_player_to_act
         assert labels.size() == (batch_size, 1)
         labels = (labels * action_one_hot).sum(dim=1, keepdim=True)
         assert action_one_hot.size() == batch.possible_actions.size()
@@ -135,13 +140,15 @@ class ActorCritic(torch.nn.Module):
             # advantage_loss = torch.nn.LeakyReLU()(advantage).sum(dim=1, keepdim=True)
             advantage_loss = advantage_loss.mean()
 
-            entropy_loss = 1.0 * torch.mean(
-                torch.sum(
-                    -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
-                    dim=1,
-                    keepdim=True,
-                )
+            entropy = torch.sum(
+                -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
+                dim=1,
+                keepdim=True,
+            ) / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
+                min=1e-6
             )
+            assert ((entropy > 1.0).sum() + (entropy < 0.0).sum()) == 0
+            entropy_loss = 0.1 * torch.nn.L1Loss()(entropy, torch.ones_like(entropy))
 
             actor_loss = advantage_loss + entropy_loss
             # print("Actor losses", loss, entropy_loss)
@@ -160,15 +167,20 @@ class ActorCritic(torch.nn.Module):
         }
 
 
-class TorchSaveCallback(pl.Callback):
-    def on_epoch_end(self, trainer, pl_module):
-        for i, actor_critic in enumerate(pl_module.actor_critics):
-            torch.save(actor_critic, f"MAC_ActorCritic_{i}.torch")
-            game = pl_module.game
-            actor = copy.deepcopy(actor_critic).cpu().eval()
+def test_actors(game, epoch: int, actor_critics):
+    for i, actor_critic in enumerate(actor_critics):
+        actor = copy.deepcopy(actor_critic).cpu().eval()
 
-            with torch.no_grad():
-                # Check winrate against random player
+        with torch.no_grad():
+            for current_epoch in range(-1, epoch + 1, max(1, epoch // 5)):
+                # Check winrate against random or past player
+                opponent_policy = None
+                if current_epoch >= 0:
+                    opponent_policy = (
+                        torch.load(f"MAC_ActorCritic_{current_epoch}_{0}.torch")
+                        .cpu()
+                        .eval()
+                    )
                 scoreCounter: Counter = Counter()
                 NUM_RANDOM_GAMES = 1000
                 num_decisions = 0
@@ -183,14 +195,18 @@ class TorchSaveCallback(pl.Callback):
                         not gameState.terminal()
                     ):  # gameState.phase != GamePhase.GAME_OVER:
                         seatToAct = gameState.get_player_to_act()
+                        possible_action_mask = gameState.get_one_hot_actions(True)
                         if seatToAct == 0:
-                            possible_action_mask = gameState.get_one_hot_actions(True)
                             gameState.populate_features(features[0])
                             action_probs = actor(
                                 features, possible_action_mask.unsqueeze(0)
                             )[0]
+                        elif opponent_policy is not None:
+                            gameState.populate_features(features[0])
+                            action_probs = opponent_policy(
+                                features, possible_action_mask.unsqueeze(0)
+                            )[0]
                         else:
-                            possible_action_mask = gameState.get_one_hot_actions(True)
                             action_probs = possible_action_mask.float()
                         action_prob_dist = torch.distributions.Categorical(
                             action_probs * possible_action_mask
@@ -203,11 +219,20 @@ class TorchSaveCallback(pl.Callback):
                     payoffs = gameState.payoffs()
                     for i, p in enumerate(payoffs):
                         scoreCounter[str(i)] += p
+                print(f"TESTING EPOCH {current_epoch}")
                 print("DECISION HISTOGRAM")
                 print(average_decision / num_decisions)
-                print("SCORE AGAINST RANDOM")
+                print(f"SCORE AGAINST PLAYER")
                 for x in range(gameState.num_players):
                     print(x, scoreCounter[str(x)] / float(NUM_RANDOM_GAMES))
+
+
+class TorchSaveCallback(pl.Callback):
+    def on_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch
+        for i, actor_critic in enumerate(pl_module.actor_critics):
+            torch.save(actor_critic, f"MAC_ActorCritic_{epoch}_{i}.torch")
+        test_actors(pl_module.game, epoch, pl_module.actor_critics)
 
 
 NUM_PARALLEL_MODELS = 1
@@ -223,6 +248,8 @@ class MeanActorCritic(pl.LightningModule):
                 for _ in range(NUM_PARALLEL_MODELS)
             ]
         )
+        self.learning_rate = 0.01
+        # test_actors(self.game, self.current_epoch, self.actor_critics)
 
     def forward(self, inputs):
         self.actor_critics[0].forward(inputs)
@@ -233,9 +260,10 @@ class MeanActorCritic(pl.LightningModule):
             gpus=1,
             # show_progress_bar=False,
             max_epochs=10000,
-            default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
+            # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
             val_check_interval=1000,
             callbacks=[TorchSaveCallback()],
+            # auto_lr_find=True,
         )
         trainer.disable_validation = True
         trainer.fit(self)
@@ -247,13 +275,15 @@ class MeanActorCritic(pl.LightningModule):
         return torch.utils.data.DataLoader(self.train_dataset, pin_memory=True,)
 
     def configure_optimizers(self):
-        return (
-            [
-                torch.optim.Adam(x.parameters(), lr=0.1, weight_decay=0.01)
-                for x in self.actor_critics
-            ],
-            [],
-        )
+        optimizers = [
+            torch.optim.Adam(x.parameters(), lr=(self.learning_rate))
+            for x in self.actor_critics
+        ]
+        schedulers = [
+            torch.optim.lr_scheduler.MultiplicativeLR(o, lr_lambda=lambda epoch: 0.95)
+            for o in optimizers
+        ]
+        return optimizers, schedulers
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
+    def training_step(self, batch, batch_idx, optimizer_idx=0):
         return self.actor_critics[optimizer_idx].training_step(batch, batch_idx)

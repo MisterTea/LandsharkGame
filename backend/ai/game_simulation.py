@@ -13,6 +13,7 @@ from torch.utils.data import IterableDataset
 
 from ai.types import GameRollout
 from engine.game_interface import GameInterface
+from utils.priority import lowpriority
 from utils.profiler import Profiler
 
 
@@ -79,6 +80,13 @@ def traverse(
     return result
 
 
+def start_traverse(
+    game: GameInterface, policy_network, metrics: Counter, level: int,
+) -> GameRollout:
+    lowpriority()
+    return traverse(game, policy_network, metrics, level)
+
+
 NUM_PARALLEL_GAMES = 8
 
 
@@ -118,7 +126,9 @@ class GameSimulationIterator(Thread):
             else:
                 eval_net = None
             self.pool.apply_async(
-                traverse, args=(ng, eval_net, metrics, 0,), callback=self.finish_game
+                start_traverse,
+                args=(ng, eval_net, metrics, 0,),
+                callback=self.finish_game,
             )
 
     def finish_game(self, gr):
@@ -137,10 +147,8 @@ class GameSimulationIterator(Thread):
             raise StopIteration
         while len(self.results) == 0:
             time.sleep(1.0)
-        r = self.results
-        self.results = []
+        r = random.sample(self.results, min(1024, len(self.results)))
         self.on_iter += 1
-        # print("Processing", len(r))
         states = torch.cat([gr.states for gr in r])
         actions = torch.cat([gr.actions for gr in r])
         possible_actions = torch.cat([gr.possible_actions for gr in r])
