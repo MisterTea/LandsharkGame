@@ -52,6 +52,9 @@ class RpsGame(GameInterface):
 
         self.reset()
 
+    def __hash__(self):
+        return self.get_player_to_act()
+
     @property
     def num_players(self):
         return 2
@@ -73,6 +76,9 @@ class RpsGame(GameInterface):
 
     def get_one_hot_actions(self, hacks):
         return torch.ones((len(RpsGame.ActionName),), dtype=torch.float)
+
+    def getPossibleActions(self):
+        return list(range(len(RpsGame.ActionName)))
 
     def populate_features(self, features: torch.Tensor):
         features.fill_(1.0)

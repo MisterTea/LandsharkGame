@@ -47,12 +47,34 @@ class GameState:
     ]
 
     def __init__(self, num_players: int):
+        self.num_players = num_players
+        assert num_players <= 4 and num_players > 0
+        self.reset()
+
+    def __hash__(self):
+        items_to_hash = [self.phase, self.biddingPlayer]
+        items_to_hash.append(tuple(self.money))
+        for p in self.playerStates:
+            items_to_hash.append(tuple(p.propertyCards))
+        if self.phase == GamePhase.BUYING_HOUSES:
+            items_to_hash.append(tuple(self.canBid))
+            items_to_hash.append(tuple(self.moneyBid))
+        elif self.phase == GamePhase.SELLING_HOUSES:
+            for p in self.playerStates:
+                items_to_hash.append(tuple(p.dollarCards))
+        else:
+            raise NotImplementedError()
+        return hash(tuple(items_to_hash))
+
+    def clone(self):
+        cloned_game = copy.deepcopy(self)
+        return cloned_game
+
+    def reset(self):
         self.propertyCardsToDraw = np.array(list(range(1, 31)))
         self.dollarCardsToDraw = np.array([0, 0] + (list(range(2, 16)) * 2))
         self.biddingPlayer = 0
         self.highestBid = -1
-        self.num_players = num_players
-        assert num_players <= 4 and num_players > 0
 
         playerStates = []
         for x in range(self.num_players):
@@ -70,31 +92,6 @@ class GameState:
 
         self.phase = GamePhase.BUYING_HOUSES
 
-        self.reset()
-
-    def __hash__(self):
-        items_to_hash = [self.phase]
-        if self.phase == GamePhase.BUYING_HOUSES:
-            for p in self.playerStates:
-                items_to_hash.append(p.money)
-                items_to_hash.append(p.canBid)
-                items_to_hash.append(p.moneyBid)
-                items_to_hash.append(tuple(p.propertyCards))
-        elif self.phase == GamePhase.SELLING_HOUSES:
-            for p in self.playerStates:
-                items_to_hash.append(p.money)
-                items_to_hash.append(p.propertyBid)
-                items_to_hash.append(tuple(p.propertyCards))
-                items_to_hash.append(tuple(p.dollarCards))
-        else:
-            raise NotImplementedError()
-        return hash(tuple(items_to_hash))
-
-    def clone(self):
-        cloned_game = copy.deepcopy(self)
-        return cloned_game
-
-    def reset(self):
         if self.num_players == 3:
             self.onPropertyCard = 6
             self.onDollarCard = 6
@@ -168,15 +165,16 @@ class GameState:
         if self.num_players == 3:
             scores = torch.tensor([-8.0, 0.0, 8.0])
         elif self.num_players == 4:
-            scores = torch.tensor([-8.0, -2.0, 2.0, 8.0])
+            # scores = torch.tensor([-8.0, -2.0, 2.0, 8.0])
+            scores = torch.tensor([-1.0, -1.0, -1.0, 3.0])
         for index, place in enumerate(places):
             payoff[place] = scores[index]
         return payoff
 
-    def get_one_hot_actions(self, hacks):
+    def get_one_hot_actions(self, hacks=False):
         player_index = self.get_player_to_act()
         player = self.playerStates[player_index]
-        actions = self.getPossibleActions(player_index)
+        actions = self.getPossibleActions()
         actions_one_hot = torch.zeros((self.action_dim(),), dtype=torch.int)
         if (
             False
@@ -200,7 +198,7 @@ class GameState:
 
     def feature_dim(self):
         # return 31 + 17 + (47 * self.num_players)
-        return 6 + 30 + 16 + (4 * self.num_players)
+        return 6 + 30 + 30 + 16 + 16 + (4 * self.num_players)
 
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
@@ -219,11 +217,24 @@ class GameState:
             features[cursor + 1] = float(p[-1])
             cursor += 2
 
-            t = torch.tensor(self.getPropertyOnAuction(), dtype=torch.long)
+            t = torch.tensor(p, dtype=torch.long)
             features[cursor + (t - 1)] = 1.0
             cursor += 30
+
+            if self.onPropertyCard > 0:
+                t = torch.tensor(self.propertyCardsToDraw[0 : self.onPropertyCard])
+                features[cursor + (t - 1)] = 1.0
+            cursor += 30
+
+            cursor += 16
         else:
-            cursor += 33
+            cursor += 63
+
+            if self.onDollarCard > 0:
+                t = torch.tensor(self.dollarCardsToDraw[0 : self.onDollarCard])
+                dollars, counts = torch.unique(t, return_counts=True)
+                features[dollars.long() + cursor] = counts.float()
+            cursor += 16
 
         if self.phase == GamePhase.SELLING_HOUSES:
             features[cursor] = (30 - self.onDollarCard) // self.num_players
@@ -258,9 +269,7 @@ class GameState:
             cursor += 2
 
             if len(player.dollarCards) > 0:
-                features[cursor] = float(sum(player.dollarCards)) + int(
-                    self.money[player_index]
-                )
+                features[cursor] = float(sum(player.dollarCards))
 
             cursor += 1
 
@@ -269,8 +278,8 @@ class GameState:
                 break
 
         assert (
-            cursor <= self.feature_dim()
-        ), f"Too many features: {cursor} {self.feature_dim()}"
+            cursor == self.feature_dim()
+        ), f"Incorrect feature size: {cursor} {self.feature_dim()}"
         return features
 
     def get_player_to_act(self):
@@ -284,7 +293,7 @@ class GameState:
             assert False, "Oops"
         assert False, "Should never get here"
 
-    def act(self, player: int, action_index: int):
+    def act(self, player: int, action_index: int, skip_forced_actions: bool = True):
         assert player == self.get_player_to_act()
         if self.phase == GamePhase.BUYING_HOUSES:
             self.playerAction(player, action_index - 1)
@@ -292,6 +301,15 @@ class GameState:
             self.playerAction(player, (action_index - 20) + 1)
         else:
             assert False, "Oops"
+        if (
+            skip_forced_actions
+            and not self.terminal()
+            and len(self.getPossibleActions()) == 1
+        ):
+            action_one_hot = int(
+                torch.nonzero(self.get_one_hot_actions(), as_tuple=True)[0][0].item()
+            )
+            self.act(self.get_player_to_act(), action_one_hot, skip_forced_actions)
 
     def getPropertyOnAuction(self):
         assert self.phase == GamePhase.BUYING_HOUSES
@@ -332,7 +350,8 @@ class GameState:
         else:
             assert False, "Oops"
 
-    def getPossibleActions(self, seat: int):
+    def getPossibleActions(self):
+        seat = self.get_player_to_act()
         if self.phase == GamePhase.BUYING_HOUSES:
             assert seat == self.biddingPlayer
             assert self.canBid[seat]
@@ -411,7 +430,7 @@ class GameState:
             assert self.propertyBid[seat] == 0
             assert (
                 action in biddingPlayer.propertyCards
-            ), "Tried to bid a property that you don't own"
+            ), f"Tried to bid a property that you don't own: {action}, {biddingPlayer.propertyCards}"
             self.propertyBid[seat] = action
             self.handlePropertyBidFinish()
 

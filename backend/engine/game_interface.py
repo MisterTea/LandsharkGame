@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from typing import List
+
 import torch
 
 
@@ -30,6 +32,9 @@ class GameInterface:
         raise NotImplementedError()
 
     def get_player_to_act(self) -> int:
+        raise NotImplementedError()
+
+    def getPossibleActions(self) -> List[int]:
         raise NotImplementedError()
 
     def get_one_hot_actions(self, hacks) -> torch.Tensor:

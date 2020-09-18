@@ -1,0 +1,33 @@
+[submodule "mcts/external/nlohmann_json"]
+	path = mcts/external/nlohmann_json
+	url = https://github.com/nlohmann/json.git
+[submodule "mcts/external/SimpleWebServer"]
+	path = mcts/external/SimpleWebServer
+	url = https://gitlab.com/eidheim/Simple-Web-Server.git
+[submodule "mcts/external/eigen"]
+	path = mcts/external/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+[submodule "mcts/external/easyloggingpp"]
+	path = mcts/external/easyloggingpp
+	url = https://github.com/amrayn/easyloggingpp.git
+[submodule "mcts/external/xxHash"]
+	path = mcts/external/xxHash
+	url = https://github.com/Cyan4973/xxHash.git
+[submodule "mcts/external/cotire"]
+	path = mcts/external/cotire
+	url = https://github.com/sakra/cotire.git
+[submodule "mcts/external/UniversalStackTrace"]
+	path = mcts/external/UniversalStackTrace
+	url = https://github.com/MisterTea/UniversalStacktrace.git
+[submodule "mcts/external/sanitizers-cmake"]
+	path = mcts/external/sanitizers-cmake
+	url = https://github.com/arsenm/sanitizers-cmake.git
+[submodule "mcts/external/vcpkg"]
+	path = mcts/external/vcpkg
+	url = https://github.com/microsoft/vcpkg.git
+[submodule "mcts/external/Catch2"]
+	path = mcts/external/Catch2
+	url = https://github.com/catchorg/Catch2.git
+[submodule "mcts/external/static_vector"]
+	path = mcts/external/static_vector
+	url = https://github.com/gnzlbg/static_vector.git
