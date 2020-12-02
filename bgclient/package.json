@@ -1,57 +1,32 @@
 {
-  "name": "bgclient",
-  "version": "0.1.0",
-  "private": true,
-  "dependencies": {
-    "@testing-library/jest-dom": "^4.2.4",
-    "@testing-library/react": "^9.3.2",
-    "@testing-library/user-event": "^7.1.2",
-    "@types/jest": "^24.0.0",
-    "@types/node": "^12.0.0",
-    "@types/react": "^16.9.0",
-    "@types/react-dom": "^16.9.0",
-    "babel-plugin-relay": "^9.0.0",
-    "bootstrap": "^4.4.1",
-    "graphql": "^15.0.0",
-    "graphql.macro": "^1.4.2",
-    "husky": "^4.2.5",
-    "lint-staged": "^10.1.7",
-    "prettier": "^2.0.5",
-    "react": "^16.13.1",
-    "react-dom": "^16.13.1",
-    "react-router-dom": "^5.1.2",
-    "react-scripts": "3.4.1",
-    "typescript": "~3.7.2"
-  },
+  "name": "auth0",
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "dev": "next",
+    "build": "next build",
+    "start": "next start",
+    "migrate:make": "knex migrate:make",
+    "migrate:latest": "knex migrate:latest",
+    "migrate:up": "knex migrate:up",
+    "migrate:down": "knex migrate:down",
+    "migrate:status": "knex migrate:status",
+    "seed:create": "knex seed:make",
+    "seed:run": "knex seed:run"
   },
-  "eslintConfig": {
-    "extends": "react-app"
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@auth0/nextjs-auth0": "^0.8.0",
+    "@segment/snippet": "^4.13.1",
+    "analytics-node": "^3.4.0-beta.3",
+    "knex": "^0.21.12",
+    "next": "^10.0.3",
+    "react": "^16.12.0",
+    "react-dom": "^16.12.0",
+    "sqlite3": "^5.0.0"
   },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
-  },
-  "husky": {
-    "hooks": {
-      "pre-commit": "lint-staged"
-    }
-  },
-  "lint-staged": {
-    "src/**/*.{js,jsx,ts,tsx,json,css,scss,md}": [
-      "prettier --write"
-    ]
+  "devDependencies": {
+    "@types/auth0": "^2.20.10",
+    "@types/react": "^17.0.0",
+    "typescript": "^4.1.2"
   }
 }
