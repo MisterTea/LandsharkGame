@@ -18,8 +18,8 @@ class Profiler:
             return False
         self.pr.disable()
         s = io.StringIO()
-        sortby = pstats.SortKey.CUMULATIVE
+        sortby = pstats.SortKey.TIME
         ps = pstats.Stats(self.pr, stream=s).sort_stats(sortby)
-        ps.print_stats()
+        ps.print_stats(100)
         print(s.getvalue())
         return False

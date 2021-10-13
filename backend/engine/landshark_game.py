@@ -6,6 +6,7 @@ from enum import IntEnum
 from typing import Dict, List, Tuple
 from uuid import UUID, uuid4
 
+import cython
 import numpy as np
 import torch
 
@@ -27,6 +28,38 @@ class GamePhase(IntEnum):
     BUYING_HOUSES = 1
     SELLING_HOUSES = 2
     GAME_OVER = 3
+
+#@cython.cfunc
+def _populate_player_features(features, playerStates, money, player_index:cython.int, player_to_act:cython.int, num_players:cython.int, feature_dim:cython.int, cursor:cython.int):
+    while True:
+        #print("On Player", player_index)
+        player = playerStates[player_index]
+
+        features[cursor] = int(money[player_index])
+        cursor += 1
+
+        # t = torch.tensor(player.propertyCards, dtype=torch.long)
+        # features[cursor + (t - 1)] = 1.0
+        # cursor += 30
+
+        if len(player.propertyCards) > 0:
+            features[cursor] = float(min(player.propertyCards))
+            features[cursor + 1] = float(max(player.propertyCards))
+        cursor += 2
+
+        if len(player.dollarCards) > 0:
+            features[cursor] = float(sum(player.dollarCards))
+
+        cursor += 1
+
+        player_index = (player_index + 1) % num_players
+        if player_index == player_to_act:
+            break
+
+    assert (
+        cursor == feature_dim
+    ), f"Incorrect feature size: {cursor} {feature_dim}"
+    return features
 
 
 class GameState:
@@ -185,15 +218,18 @@ class GameState:
             # HACK: Let's fold after 1 round of bidding to speed up training
             actions_one_hot[0] = 1
         else:
-            for a in actions:
-                if self.phase == GamePhase.BUYING_HOUSES:
-                    # HACK: Do not ever bid more than the spread/2
-                    if (a * 2) <= self.getPropertySpread() or hacks == False:
-                        actions_one_hot[1 + a] = 1
-                elif self.phase == GamePhase.SELLING_HOUSES:
-                    actions_one_hot[20 + (a - 1)] = 1
+            if self.phase == GamePhase.BUYING_HOUSES:
+                if hacks:
+                    for a in actions:
+                        # HACK: Do not ever bid more than the spread/2
+                        if (a * 2) <= self.getPropertySpread():
+                            actions_one_hot[1 + a] = 1
                 else:
-                    assert False, "Oops"
+                    actions_one_hot[1 + torch.LongTensor(actions)] = 1
+            elif self.phase == GamePhase.SELLING_HOUSES:
+                actions_one_hot[20 + (torch.LongTensor(actions) - 1)] = 1
+            else:
+                assert False, "Oops"
         return actions_one_hot
 
     def feature_dim(self):
@@ -205,7 +241,6 @@ class GameState:
         return int(a.max() - a.min())
 
     def populate_features(self, features: torch.Tensor):
-        player_index = self.get_player_to_act()
         cursor = 0
 
         if self.phase == GamePhase.BUYING_HOUSES:
@@ -217,12 +252,12 @@ class GameState:
             features[cursor + 1] = float(p[-1])
             cursor += 2
 
-            t = torch.tensor(p, dtype=torch.long)
+            t = torch.from_numpy(p).long()
             features[cursor + (t - 1)] = 1.0
             cursor += 30
 
             if self.onPropertyCard > 0:
-                t = torch.tensor(self.propertyCardsToDraw[0 : self.onPropertyCard])
+                t = torch.from_numpy(self.propertyCardsToDraw[0 : self.onPropertyCard]).long()
                 features[cursor + (t - 1)] = 1.0
             cursor += 30
 
@@ -252,35 +287,8 @@ class GameState:
         else:
             cursor += 19
 
-        while True:
-            # print("On Player", player_index)
-            player = self.playerStates[player_index]
-
-            features[cursor] = int(self.money[player_index])
-            cursor += 1
-
-            # t = torch.tensor(player.propertyCards, dtype=torch.long)
-            # features[cursor + (t - 1)] = 1.0
-            # cursor += 30
-
-            if len(player.propertyCards) > 0:
-                features[cursor] = float(min(player.propertyCards))
-                features[cursor + 1] = float(max(player.propertyCards))
-            cursor += 2
-
-            if len(player.dollarCards) > 0:
-                features[cursor] = float(sum(player.dollarCards))
-
-            cursor += 1
-
-            player_index = (player_index + 1) % self.num_players
-            if player_index == self.get_player_to_act():
-                break
-
-        assert (
-            cursor == self.feature_dim()
-        ), f"Incorrect feature size: {cursor} {self.feature_dim()}"
-        return features
+        player_index = self.get_player_to_act()
+        return _populate_player_features(features, self.playerStates, self.money, player_index, self.get_player_to_act(), self.num_players, self.feature_dim(), cursor)
 
     def get_player_to_act(self):
         if self.phase == GamePhase.BUYING_HOUSES:

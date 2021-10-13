@@ -10,15 +10,15 @@ from typing import List, Optional, Tuple
 
 import pytorch_lightning as pl
 import torch
+from engine.game import GamePhase, GameState
+from engine.game_interface import GameInterface
+from utils.priority import lowpriority
+from utils.profiler import Profiler
 
 from ai.expandable_tensor_set import ExpandableTensorSet
 from ai.fully_connected_forward import FullyConnectedForward
 from ai.regret_matching import RegretMatching
 from ai.reservoir_buffer import ReservoirBuffer
-from engine.game import GamePhase, GameState
-from engine.game_interface import GameInterface
-from utils.priority import lowpriority
-from utils.profiler import Profiler
 
 
 def traverse(
@@ -194,7 +194,6 @@ def start_traverse(
     regretModels: List[Optional[RegretMatching]],
     strategyModels: List[Optional[RegretMatching]],
 ) -> Tuple[int, ExpandableTensorSet, ExpandableTensorSet, Counter]:
-    lowpriority()
     NUM_INNER_GAME_ITERATIONS = 100
     with torch.no_grad():
         playerRegret = ExpandableTensorSet(

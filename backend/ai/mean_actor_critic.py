@@ -11,9 +11,10 @@ from uuid import UUID, uuid4
 import numpy as np
 import pytorch_lightning as pl
 import torch
+from engine.game_interface import GameInterface
+from utils.profiler import Profiler
 
 from ai.types import GameRollout
-from engine.game_interface import GameInterface
 
 
 def masked_softmax(x, mask, temperature):
@@ -60,7 +61,7 @@ class ActorCritic(torch.nn.Module):
             x = self.activations[i](x)
         return x
 
-    def forward(self, inputs, possible_actions):
+    def forward(self, inputs, possible_actions, do_epsilon_greedy:bool):
         x = inputs
         for i in range(len(self.shared)):
             x = self.shared[i](x)
@@ -77,21 +78,34 @@ class ActorCritic(torch.nn.Module):
         for i in range(len(self.actor_layers)):
             x = self.actor_layers[i](x)
             x = self.actor_activations[i](x)
-        x = masked_softmax(x, possible_actions, 0.1)
-        epsilon_prob = possible_actions * (
-            0.1 / possible_actions.sum(dim=1, keepdim=True).float()
-        )
-        assert epsilon_prob.size() == x.size()
-        for _ in range(5):
-            x = torch.max(x, epsilon_prob)
-            x = x / x.sum(dim=1, keepdim=True)
+        x_before_activation = x.cpu()
+        x = torch.clamp(torch.nn.Sigmoid()(x), min=1e-3, max=(1.0 - 1e-3))
+        assert torch.min(x) > 0.0
+        
+        #x = masked_softmax(x, possible_actions, 0.1)
+        # Replace softmax with linear scale
+        x = x * possible_actions.float()
+        original_x = x.cpu()
+        x = x / x.sum(dim=1, keepdim=True)
+        assert torch.allclose(torch.max(possible_actions, dim=1).values.cpu(), torch.IntTensor([1])), f"{torch.max(possible_actions, dim=1).values.cpu()}"
+        assert torch.allclose(x.sum(dim=1).cpu(), torch.Tensor([1.0])), f"{original_x.sum(dim=1).cpu()} {x_before_activation[torch.logical_not(torch.isclose(x.sum(dim=1).cpu(), torch.Tensor([1.0])))]} {original_x[torch.logical_not(torch.isclose(x.sum(dim=1).cpu(), torch.Tensor([1.0])))]}"
+        assert torch.min(x) >= 0.0
+
+        if do_epsilon_greedy:
+            epsilon_prob = possible_actions * (
+                0.1 / possible_actions.sum(dim=1, keepdim=True).float()
+            )
+            assert epsilon_prob.size() == x.size()
+            for _ in range(5):
+                x = torch.max(x, epsilon_prob)
+                x = x / x.sum(dim=1, keepdim=True)
         actor_probs = x
 
         return actor_probs, critic_action_values
 
     def training_step(self, batch_list: List[torch.Tensor], batch_idx):
         batch = GameRollout(*[x[0] for x in batch_list])
-        actor_probs, critic_action_values = self(batch.states, batch.possible_actions)
+        actor_probs, critic_action_values = self(batch.states, batch.possible_actions, True)
 
         action_one_hot = torch.nn.functional.one_hot(
             batch.actions.squeeze(1), num_classes=self.action_dim
@@ -133,7 +147,7 @@ class ActorCritic(torch.nn.Module):
             )
             assert (
                 torch.isnan(importance_weight).sum() == 0
-            ), "Invalid importance weight"
+            ), f"Invalid importance weight {actor_probs}"
             advantage_loss = -1 * (
                 importance_weight.detach() * actor_probs * detached_critic
             ).sum(dim=1, keepdim=True)
@@ -147,11 +161,14 @@ class ActorCritic(torch.nn.Module):
             ) / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
                 min=1e-6
             )
-            assert ((entropy > 1.0).sum() + (entropy < 0.0).sum()) == 0
-            entropy_loss = 0.1 * torch.nn.L1Loss()(entropy, torch.ones_like(entropy))
+            assert ((entropy > 1.01).sum() + (entropy < -0.01).sum()) == 0, f"Invalid entropy {torch.min(torch.sum(actor_probs, dim=1))}, {torch.max(torch.sum(actor_probs, dim=1))}, {entropy[entropy > 1.0]}, {entropy[entropy < 0.0]}"
+            entropy_loss = torch.nn.L1Loss()(entropy, torch.ones_like(entropy).float()) * 0.1
 
             actor_loss = advantage_loss + entropy_loss
             # print("Actor losses", loss, entropy_loss)
+
+            advantage_loss = advantage_loss.detach()
+            entropy_loss = entropy_loss.detach()
         else:
             # Don't bother training actor while critic is so wrong
             actor_loss = advantage_loss = entropy_loss = 0
@@ -161,7 +178,7 @@ class ActorCritic(torch.nn.Module):
             "progress_bar": {
                 "advantage_loss": advantage_loss,
                 "entropy_loss": entropy_loss,
-                "critic_loss": critic_loss,
+                "critic_loss": critic_loss.detach(),
             },
             "loss": actor_loss + critic_loss,
         }
@@ -177,7 +194,7 @@ def test_actors(game, epoch: int, actor_critics):
                 opponent_policy = None
                 if current_epoch >= 0:
                     opponent_policy = (
-                        torch.load(f"MAC_ActorCritic_{current_epoch}_{0}.torch")
+                        torch.load(f"models/MAC_ActorCritic_{current_epoch}_{0}.torch")
                         .cpu()
                         .eval()
                     )
@@ -199,12 +216,12 @@ def test_actors(game, epoch: int, actor_critics):
                         if seatToAct == 0:
                             gameState.populate_features(features[0])
                             action_probs = actor(
-                                features, possible_action_mask.unsqueeze(0)
+                                features, possible_action_mask.unsqueeze(0), False
                             )[0]
                         elif opponent_policy is not None:
                             gameState.populate_features(features[0])
                             action_probs = opponent_policy(
-                                features, possible_action_mask.unsqueeze(0)
+                                features, possible_action_mask.unsqueeze(0), False
                             )[0]
                         else:
                             action_probs = possible_action_mask.float()
@@ -231,7 +248,7 @@ class TorchSaveCallback(pl.Callback):
     def on_epoch_end(self, trainer, pl_module):
         epoch = trainer.current_epoch
         for i, actor_critic in enumerate(pl_module.actor_critics):
-            torch.save(actor_critic, f"MAC_ActorCritic_{epoch}_{i}.torch")
+            torch.save(actor_critic, f"models/MAC_ActorCritic_{epoch}_{i}.torch")
         test_actors(pl_module.game, epoch, pl_module.actor_critics)
 
 
@@ -257,22 +274,24 @@ class MeanActorCritic(pl.LightningModule):
     def train_model(self, train_dataset, output_file=None):
         self.train_dataset = train_dataset
         trainer = pl.Trainer(
-            gpus=1,
+            #gpus=1,
+            
             # show_progress_bar=False,
-            max_epochs=10000,
+            max_epochs=1000,
             # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
-            val_check_interval=1000,
+            val_check_interval=train_dataset.max_games,
             callbacks=[TorchSaveCallback()],
             # auto_lr_find=True,
+            num_sanity_val_steps=0
         )
-        trainer.disable_validation = True
-        trainer.fit(self)
+        with Profiler(True):
+            trainer.fit(self)
         if output_file is not None:
             trainer.save_checkpoint(output_file)
         self.train_dataset = None
 
     def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.train_dataset, pin_memory=True,)
+        return torch.utils.data.DataLoader(self.train_dataset, pin_memory=True, num_workers=10)
 
     def configure_optimizers(self):
         optimizers = [
