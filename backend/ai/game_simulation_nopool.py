@@ -11,7 +11,6 @@ import torch
 from engine.game_interface import GameInterface
 from torch import multiprocessing
 from torch.utils.data import IterableDataset
-from utils.priority import lowpriority
 from utils.profiler import Profiler
 
 from ai.game_traverse import start_traverse
@@ -50,11 +49,13 @@ class GameSimulationIterator:
             policy_network = random.choice(self.policy_networks)
             if policy_network.num_steps != self.eval_net_age:
                 self.eval_net_age = policy_network.num_steps
-                if policy_network.num_steps >= 100:
-                    self.eval_net = copy.deepcopy(policy_network).cpu().eval()
-                else:
-                    self.eval_net = None
-            gr = start_traverse(ng, self.eval_net, metrics, 0,)
+                self.eval_net = copy.deepcopy(policy_network).cpu().eval()
+            gr = start_traverse(
+                ng,
+                self.eval_net,
+                metrics,
+                0,
+            )
             self.results.append(gr)
         with torch.no_grad():
             r, self.results = self.results, []
@@ -84,10 +85,7 @@ class GameSimulationDataset(IterableDataset):
         self.policy_networks = policy_networks
 
     def __iter__(self):
-        print("Getting iterator")
-        gsi = GameSimulationIterator(
-            self.game, self.max_games, self.policy_networks
-        )
+        gsi = GameSimulationIterator(self.game, self.max_games, self.policy_networks)
         return gsi
 
     def __len__(self):

@@ -2,6 +2,7 @@
 
 import copy
 import random
+import threading
 import time
 from collections import Counter
 from threading import Thread
@@ -11,13 +12,13 @@ import torch
 from engine.game_interface import GameInterface
 from torch import multiprocessing
 from torch.utils.data import IterableDataset
-from utils.priority import lowpriority
 from utils.profiler import Profiler
 
 from ai.game_traverse import start_traverse
 from ai.types import GameRollout
 
-NUM_PARALLEL_GAMES = 16
+NUM_PARALLEL_GAMES = max(1, multiprocessing.cpu_count() - 2)
+GAMES_PER_MINIBATCH = 32
 
 
 class GameSimulationIterator:
@@ -27,7 +28,7 @@ class GameSimulationIterator:
         self.game = game.clone()
         self.policy_networks = policy_networks
         self.max_games = max_games
-        self.pool = pool
+        self.pool = multiprocessing.Pool(NUM_PARALLEL_GAMES)
         self.results = []
         self.games_in_progress = []
         self.on_iter = 0
@@ -54,40 +55,61 @@ class GameSimulationIterator:
         metrics = Counter()
         policy_network = random.choice(self.policy_networks)
         if policy_network.num_steps != self.eval_net_age:
+            # print("BUMPING POLICY NET")
             self.eval_net_age = policy_network.num_steps
-            if True or policy_network.num_steps >= 100:
-                self.eval_net = copy.deepcopy(policy_network).cpu().eval()
-            else:
-                self.eval_net = None
-        self.games_in_progress.append(self.pool.apply_async(
-            start_traverse,
-            args=(ng, self.eval_net, metrics, 0,),
-            callback=self.finish_game,
-        ))
+            self.eval_net = copy.deepcopy(policy_network).cpu().eval()
+        self.games_in_progress.append(
+            self.pool.apply_async(
+                start_traverse,
+                args=(
+                    ng,
+                    self.eval_net,
+                    metrics,
+                    0,
+                ),
+                callback=self.finish_game,
+            )
+        )
 
     def finish_game(self, gr):
-        self.results.append(gr)
-        self.start_game()
         # print("game ended")
+        self.start_game()
+        pass
 
     def __next__(self):
         self.on_iter += 1
         if self.on_iter == self.max_games:
+            self.pool.terminate()
             raise StopIteration
-        GAMES_PER_MINIBATCH = 64
-        while len(self.games_in_progress)>0 and len(self.results) < GAMES_PER_MINIBATCH:
-            game_in_progress = self.games_in_progress.pop()
-            game_in_progress.get()
+        while len(self.games_in_progress) > 0:
+            if (
+                not self.games_in_progress[0].ready()
+                and len(self.results) >= GAMES_PER_MINIBATCH
+            ):
+                # We are caught up and have enough games
+                # print(
+                #     f"Stopping collection with {len(self.games_in_progress)} in the queue"
+                # )
+                break
+            game_in_progress = self.games_in_progress.pop(0)
+            gr = game_in_progress.get()
+            self.results.append(gr)
         while len(self.results) < GAMES_PER_MINIBATCH:
-            print(f"WAITING FOR RESULTS {len(self.results)} {len(self.games_in_progress)}")
+            print(
+                f"WAITING FOR RESULTS {len(self.results)} {len(self.games_in_progress)}"
+            )
             time.sleep(0.001)
-            while len(self.games_in_progress)>0 and len(self.results) < GAMES_PER_MINIBATCH:
+            while (
+                len(self.games_in_progress) > 0
+                and len(self.results) < GAMES_PER_MINIBATCH
+            ):
                 game_in_progress = self.games_in_progress.pop()
                 game_in_progress.get()
-        #r = random.sample(self.results, min(GAMES_PER_MINIBATCH, len(self.results)))
-        #self.results.clear()
+        # r = random.sample(self.results, min(GAMES_PER_MINIBATCH, len(self.results)))
+        # self.results.clear()
         with torch.no_grad():
-            r, self.results = self.results, []
+            # print(f"GOT {len(self.results)} GAMES")
+            r, self.results = self.results[0:GAMES_PER_MINIBATCH], []
             states = torch.cat([gr.states for gr in r])
             actions = torch.cat([gr.actions for gr in r])
             possible_actions = torch.cat([gr.possible_actions for gr in r])
@@ -112,7 +134,7 @@ class GameSimulationDataset(IterableDataset):
         self.max_games = max_games
         self.game = game.clone()
         self.policy_networks = policy_networks
-        self.pool = multiprocessing.Pool(NUM_PARALLEL_GAMES)
+        self.pool = None
 
     def __iter__(self):
         print("Getting iterator")

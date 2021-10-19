@@ -18,10 +18,13 @@ from utils.profiler import Profiler
 from ai.types import GameRollout
 
 
-#@cython.cfunc
+# @cython.cfunc
 @torch.no_grad()
 def traverse(
-    game: GameInterface, policy_network, metrics: Counter, level: cython.int,
+    game: GameInterface,
+    policy_network,
+    metrics: Counter,
+    level: cython.int,
 ):
     if game.terminal():
         gr = GameRollout(
@@ -47,13 +50,18 @@ def traverse(
     metrics.update({"possible_actions_" + str(possible_actions.sum()): 1})
     has_a_choice = num_choices > 1
     if policy_network is None or not has_a_choice:
-        strategy = possible_actions.float()
+        strategy = strategy_without_exploration = (
+            possible_actions.float() / possible_actions.sum()
+        )
         active_sampling_chances = None
     else:
-        strategy = policy_network(features.unsqueeze(0), possible_actions.unsqueeze(0), True)[
-            0
-        ][0]
+        strategy = policy_network(
+            features.unsqueeze(0), possible_actions.unsqueeze(0), True
+        )[0][0]
         assert (strategy * (1 - possible_actions)).sum() == 0
+        strategy_without_exploration = policy_network(
+            features.unsqueeze(0), possible_actions.unsqueeze(0), False
+        )[0][0]
 
     action_dist = torch.distributions.Categorical(strategy)
     if action_dist.probs.min() < 0 or action_dist.probs.max() == 0:
@@ -69,24 +77,36 @@ def traverse(
     action_taken = int(action_dist.sample().item())
     game.act(player_to_act, action_taken)
     if has_a_choice:
-        result = traverse(game, policy_network, metrics, level + 1,)
+        result = traverse(
+            game,
+            policy_network,
+            metrics,
+            level + 1,
+        )
         payoff = result.payoffs[player_to_act]
         result.states[level] = features
         result.actions[level] = action_taken
         result.player_to_act[level] = player_to_act
         result.possible_actions[level] = possible_actions
-        result.policy[level] = strategy
+        result.policy[level] = strategy_without_exploration
     else:
         # Don't advance the level, skip this non-choice
-        result = traverse(game, policy_network, metrics, level,)
+        result = traverse(
+            game,
+            policy_network,
+            metrics,
+            level,
+        )
     return result
 
 
 @torch.no_grad()
 def start_traverse(
-    game: GameInterface, policy_network, metrics: Counter, level: cython.int,
+    game: GameInterface,
+    policy_network,
+    metrics: Counter,
+    level: cython.int,
 ) -> GameRollout:
+    # lowpriority()
     with Profiler(False):
         return traverse(game, policy_network, metrics, level)
-
-

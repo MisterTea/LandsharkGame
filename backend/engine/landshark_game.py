@@ -29,10 +29,20 @@ class GamePhase(IntEnum):
     SELLING_HOUSES = 2
     GAME_OVER = 3
 
-#@cython.cfunc
-def _populate_player_features(features, playerStates, money, player_index:cython.int, player_to_act:cython.int, num_players:cython.int, feature_dim:cython.int, cursor:cython.int):
+
+# @cython.cfunc
+def _populate_player_features(
+    features,
+    playerStates,
+    money,
+    player_index: cython.int,
+    player_to_act: cython.int,
+    num_players: cython.int,
+    feature_dim: cython.int,
+    cursor: cython.int,
+):
     while True:
-        #print("On Player", player_index)
+        # print("On Player", player_index)
         player = playerStates[player_index]
 
         features[cursor] = int(money[player_index])
@@ -56,9 +66,7 @@ def _populate_player_features(features, playerStates, money, player_index:cython
         if player_index == player_to_act:
             break
 
-    assert (
-        cursor == feature_dim
-    ), f"Incorrect feature size: {cursor} {feature_dim}"
+    assert cursor == feature_dim, f"Incorrect feature size: {cursor} {feature_dim}"
     return features
 
 
@@ -196,10 +204,10 @@ class GameState:
         places = torch.sort(absolute_payoffs)[1]
         payoff = torch.zeros_like(absolute_payoffs)
         if self.num_players == 3:
-            scores = torch.tensor([-8.0, 0.0, 8.0])
+            scores = torch.tensor([-2.0, -1.0, 3.0])
         elif self.num_players == 4:
             # scores = torch.tensor([-8.0, -2.0, 2.0, 8.0])
-            scores = torch.tensor([-1.0, -1.0, -1.0, 3.0])
+            scores = torch.tensor([-4.0, -2.0, -1.0, 7.0])
         for index, place in enumerate(places):
             payoff[place] = scores[index]
         return payoff
@@ -234,6 +242,8 @@ class GameState:
 
     def feature_dim(self):
         # return 31 + 17 + (47 * self.num_players)
+
+        # return 6 + 30 + 30 + 16 + 16 + (4 * self.num_players)
         return 6 + 30 + 30 + 16 + 16 + (4 * self.num_players)
 
     def getPropertySpread(self):
@@ -257,7 +267,9 @@ class GameState:
             cursor += 30
 
             if self.onPropertyCard > 0:
-                t = torch.from_numpy(self.propertyCardsToDraw[0 : self.onPropertyCard]).long()
+                t = torch.from_numpy(
+                    self.propertyCardsToDraw[0 : self.onPropertyCard]
+                ).long()
                 features[cursor + (t - 1)] = 1.0
             cursor += 30
 
@@ -288,7 +300,16 @@ class GameState:
             cursor += 19
 
         player_index = self.get_player_to_act()
-        return _populate_player_features(features, self.playerStates, self.money, player_index, self.get_player_to_act(), self.num_players, self.feature_dim(), cursor)
+        return _populate_player_features(
+            features,
+            self.playerStates,
+            self.money,
+            player_index,
+            self.get_player_to_act(),
+            self.num_players,
+            self.feature_dim(),
+            cursor,
+        )
 
     def get_player_to_act(self):
         if self.phase == GamePhase.BUYING_HOUSES:
