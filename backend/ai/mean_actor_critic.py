@@ -35,13 +35,22 @@ class ActorCritic(torch.nn.Module):
         super().__init__()
         self.feature_dim = feature_dim
         self.action_dim = action_dim
+
+        self.player_property_embedding = torch.nn.Embedding(31, 16)
+
+        self.player_embedding = torch.nn.Sequential(
+            torch.nn.Linear(18, 16), torch.nn.LeakyReLU()
+        )
+
+        self.bidding_property_embedding = torch.nn.Embedding(31, 16)
+        self.property_consumed_embedding = torch.nn.Embedding(31, 16)
+
+        self.bidding_dollar_embedding = torch.nn.Embedding(17, 16)
+        self.dollar_consumed_embedding = torch.nn.Embedding(17, 16)
+
         self.shared = torch.nn.Sequential(
-            (torch.nn.Linear(feature_dim, 64)),
+            (torch.nn.Linear(98, 64)),
             torch.nn.LeakyReLU(),
-            # torch.nn.BatchNorm1d(128),
-            (torch.nn.Linear(64, 64)),
-            torch.nn.LeakyReLU(),
-            # torch.nn.BatchNorm1d(64),
         )
 
         self.critic = torch.nn.Sequential(
@@ -57,7 +66,70 @@ class ActorCritic(torch.nn.Module):
         self.num_steps = 0
 
     def forward(self, inputs, possible_actions, do_epsilon_greedy: bool):
-        x = inputs
+        inputs = inputs.detach()
+
+        # Embed player properties
+        opponent_vector = None
+        for player_index in range(0, 4):
+            cursor = 1 + 4 + 30 + 30 + 1 + 4 + (9 * player_index)
+            property_indices = inputs[:, cursor + 1 : cursor + 8].long()
+            e = (self.player_property_embedding(property_indices)).mean(dim=1)
+
+            player_embedding = self.player_embedding(
+                torch.cat(
+                    (
+                        e,
+                        inputs[
+                            :,
+                            (cursor, cursor + 8),
+                        ],
+                    ),
+                    dim=1,
+                )
+            )
+            if player_index == 0:
+                self_vector = player_embedding
+            elif opponent_vector is None:
+                opponent_vector = player_embedding
+            else:
+                opponent_vector = opponent_vector + player_embedding
+
+        # Embed houses to buy
+        cursor = 1
+        property_indices = inputs[:, cursor : cursor + 4].long()
+        houses_to_buy = (self.bidding_property_embedding(property_indices)).mean(dim=1)
+
+        # Embed properties consumed
+        cursor = 1 + 4
+        property_indices = inputs[:, cursor : cursor + 30].long()
+        property_consumed = (self.property_consumed_embedding(property_indices)).mean(
+            dim=1
+        )
+
+        # Embed dollar cards to buy
+        cursor = 1 + 4 + 30 + 30 + 1
+        dollar_indices = inputs[:, cursor : cursor + 4].long()
+        dollars_to_buy = (self.bidding_dollar_embedding(dollar_indices)).mean(dim=1)
+
+        # Embed dollars consumed
+        cursor = 1 + 4 + 30
+        dollar_indices = inputs[:, cursor : cursor + 30].long()
+        dollars_consumed = (self.dollar_consumed_embedding(dollar_indices)).mean(dim=1)
+
+        x = torch.cat(
+            (
+                inputs[:, 0:1],
+                houses_to_buy,
+                property_consumed,
+                inputs[:, 1 + 4 + 30 + 30 : 1 + 4 + 30 + 30 + 1],
+                dollars_to_buy,
+                dollars_consumed,
+                self_vector,
+                opponent_vector,
+            ),
+            dim=1,
+        )
+
         x = self.shared(x)
 
         shared_result = x
@@ -94,6 +166,7 @@ class ActorCritic(torch.nn.Module):
         return actor_probs, critic_action_values
 
     def training_step(self, batch_list: List[torch.Tensor], batch_idx):
+        self.num_steps += 1
         batch = GameRollout(*[x[0] for x in batch_list])
         actor_probs, critic_action_values = self(
             batch.states, batch.possible_actions, True
@@ -183,7 +256,6 @@ class ActorCritic(torch.nn.Module):
             # Don't bother training actor while critic is so wrong
             actor_loss = advantage_loss = entropy_loss = 0
 
-        self.num_steps += 1
         return {
             "progress_bar": {
                 "advantage_loss": advantage_loss,
@@ -316,22 +388,23 @@ class MeanActorCritic(pl.LightningModule):
 
     def training_step(self, batch, batch_idx, optimizer_idx=0):
         retval = self.actor_critics[optimizer_idx].training_step(batch, batch_idx)
-        self.log(
-            "critic_loss",
-            retval["progress_bar"]["critic_loss"],
-            prog_bar=True,
-            on_step=True,
-        )
-        self.log(
-            "advantage_loss",
-            retval["progress_bar"]["advantage_loss"],
-            prog_bar=True,
-            on_step=True,
-        )
-        self.log(
-            "entropy_loss",
-            retval["progress_bar"]["entropy_loss"],
-            prog_bar=True,
-            on_step=True,
-        )
+        if "progress_bar" in retval:
+            self.log(
+                "critic_loss",
+                retval["progress_bar"]["critic_loss"],
+                prog_bar=True,
+                on_step=True,
+            )
+            self.log(
+                "advantage_loss",
+                retval["progress_bar"]["advantage_loss"],
+                prog_bar=True,
+                on_step=True,
+            )
+            self.log(
+                "entropy_loss",
+                retval["progress_bar"]["entropy_loss"],
+                prog_bar=True,
+                on_step=True,
+            )
         return retval

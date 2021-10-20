@@ -37,7 +37,7 @@ class GameSimulationIterator:
 
         # Spin up some games
         for _ in range(NUM_PARALLEL_GAMES):
-            print("SPINNING UP GAMES")
+            # print("SPINNING UP GAMES")
             self.start_game()
 
     def __iter__(self):
@@ -53,11 +53,14 @@ class GameSimulationIterator:
         ng = self.game.clone()
         ng.reset()
         metrics = Counter()
+        # self.eval_net = None
+
         policy_network = random.choice(self.policy_networks)
         if policy_network.num_steps != self.eval_net_age:
             # print("BUMPING POLICY NET")
             self.eval_net_age = policy_network.num_steps
             self.eval_net = copy.deepcopy(policy_network).cpu().eval()
+
         self.games_in_progress.append(
             self.pool.apply_async(
                 start_traverse,
