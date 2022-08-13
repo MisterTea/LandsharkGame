@@ -2,9 +2,9 @@
 
 import copy
 import random
-import threading
 import time
 from collections import Counter
+from multiprocessing.pool import ThreadPool
 from threading import Thread
 from typing import List
 
@@ -14,21 +14,20 @@ from torch import multiprocessing
 from torch.utils.data import IterableDataset
 from utils.profiler import Profiler
 
+from ai.game_simulation_nopool import GAMES_PER_MINIBATCH
 from ai.game_traverse import start_traverse
 from ai.types import GameRollout
-
-GAMES_PER_MINIBATCH = 256
 
 
 class GameSimulationIterator:
     def __init__(
-        self, game: GameInterface, minibatches_per_epoch: int, policy_networks, pool
+        self, game: GameInterface, minibatches_per_epoch: int, policy_networks
     ):
         super().__init__()
         self.game = game.clone()
         self.policy_networks = policy_networks
         self.minibatches_per_epoch = minibatches_per_epoch
-        self.pool = pool
+        self.pool = ThreadPool(4)
         self.games_in_progress = []
         self.on_iter = 0
         self.eval_net = None
@@ -107,17 +106,16 @@ class GameSimulationIterator:
 
 class GameSimulationDataset(IterableDataset):
     def __init__(
-        self, game: GameInterface, minibatches_per_epoch: int, policy_networks, pool
+        self, game: GameInterface, minibatches_per_epoch: int, policy_networks
     ):
         self.minibatches_per_epoch = minibatches_per_epoch
         self.game = game.clone()
         self.policy_networks = policy_networks
-        self.pool = pool
 
     def __iter__(self):
         # print("Getting iterator")
         gsi = GameSimulationIterator(
-            self.game, self.minibatches_per_epoch, self.policy_networks, self.pool
+            self.game, self.minibatches_per_epoch, self.policy_networks
         )
         return gsi
 

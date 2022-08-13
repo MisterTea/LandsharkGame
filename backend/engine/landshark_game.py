@@ -30,7 +30,7 @@ class GamePhase(IntEnum):
     GAME_OVER = 3
 
 
-class GameState:
+class Game(GameInterface):
     __slots__ = [
         "propertyCardsToDraw",
         "dollarCardsToDraw",

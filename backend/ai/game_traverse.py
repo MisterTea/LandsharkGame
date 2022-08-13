@@ -83,7 +83,11 @@ def traverse(
             metrics,
             level + 1,
         )
-        payoff = result.payoffs[player_to_act]
+
+        result.payoffs[level] = torch.roll(
+            result.payoffs[level], shifts=-player_to_act, dims=0
+        )
+
         result.states[level] = features
         result.actions[level] = action_taken
         result.player_to_act[level] = player_to_act

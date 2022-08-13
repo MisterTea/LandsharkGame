@@ -331,7 +331,7 @@ def test_actors(game, epoch: int, actor_critics):
 
 
 class TorchSaveCallback(pl.Callback):
-    def on_epoch_end(self, trainer, pl_module):
+    def on_train_epoch_end(self, trainer, pl_module):
         epoch = trainer.current_epoch
         # for i, actor_critic in enumerate(pl_module.actor_critics):
         # torch.save(actor_critic, f"models/MAC_ActorCritic_{epoch}_{i}.torch")
@@ -480,13 +480,20 @@ class StateValueLightning(pl.LightningModule):
             # val_check_interval=train_dataset.max_games,
             callbacks=[
                 TorchSaveCallback(),
-                EarlyStopping(monitor="val_loss", mode="min", patience=10),
+                EarlyStopping(
+                    monitor="val_loss", mode="min", patience=10, verbose=True
+                ),
             ],
             # auto_lr_find=True,
             # num_sanity_val_steps=0,
+            # resume_from_checkpoint="lightning_logs/version_125/"
         )
-        train_loader = torch.utils.data.DataLoader(train_dataset, pin_memory=True)
-        val_loader = torch.utils.data.DataLoader(val_dataset, pin_memory=True)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, pin_memory=True, num_workers=16, persistent_workers=True
+        )
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset, pin_memory=True, num_workers=16, persistent_workers=True
+        )
         with Profiler(True):
             trainer.fit(
                 self, train_dataloaders=train_loader, val_dataloaders=val_loader
@@ -495,12 +502,12 @@ class StateValueLightning(pl.LightningModule):
             trainer.save_checkpoint(output_file)
 
     def configure_optimizers(self):
-        # optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        # optimizer = torch.optim.AdamW(self.parameters(), lr=5e-5)
+        # optimizer = torch.optim.Adam(self.parameters(), lr=0.1)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=0.01)
 
         # optimizer = torch.optim.SGD(self.parameters(), lr=0.001)
 
-        optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.1)
+        # optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.05)
 
         return {
             "optimizer": optimizer,
@@ -508,7 +515,7 @@ class StateValueLightning(pl.LightningModule):
                 "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
                     optimizer, factor=0.5, patience=2, verbose=True
                 ),
-                "monitor": "loss",
+                "monitor": "val_loss",
                 "frequency": 1
                 # If "monitor" references validation metrics, then "frequency" should be set to a
                 # multiple of "trainer.check_val_every_n_epoch".
@@ -525,6 +532,6 @@ class StateValueLightning(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         val_loss_dict = self.model.validation_step(batch, batch_idx)
         # print("VAL",val_loss_dict)
-        self.log("val_loss", val_loss_dict["val_loss"], prog_bar=True)
+        self.log("val_loss", val_loss_dict["val_loss"], prog_bar=True, on_epoch=True)
         # val_loss_dict["progress_bar"] = copy.deepcopy(val_loss_dict)
         return val_loss_dict

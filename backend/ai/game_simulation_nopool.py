@@ -16,14 +16,18 @@ from utils.profiler import Profiler
 from ai.game_traverse import start_traverse
 from ai.types import GameRollout
 
+GAMES_PER_MINIBATCH = 64
+
 
 class GameSimulationIterator:
-    def __init__(self, game: GameInterface, max_games: int, policy_networks):
+    def __init__(
+        self, game: GameInterface, minibatches_per_epoch: int, policy_networks
+    ):
         super().__init__()
         self.on_game = 0
         self.game = game.clone()
         self.policy_networks = policy_networks
-        self.max_games = max_games
+        self.minibatches_per_epoch = minibatches_per_epoch
         self.results = []
         self.games_in_progress = []
         self.on_iter = 0
@@ -36,20 +40,20 @@ class GameSimulationIterator:
         return self
 
     def __next__(self):
-        self.on_iter += 1
-        if self.on_iter == self.max_games:
+        if self.on_iter == self.minibatches_per_epoch:
             raise StopIteration
-        GAMES_PER_MINIBATCH = 64
+        self.on_iter += 1
         for x in range(GAMES_PER_MINIBATCH):
             self.on_game += 1
             # print("Starting", self.on_game)
             ng = self.game.clone()
             ng.reset()
             metrics = Counter()
-            policy_network = random.choice(self.policy_networks)
-            if policy_network.num_steps != self.eval_net_age:
-                self.eval_net_age = policy_network.num_steps
-                self.eval_net = copy.deepcopy(policy_network).cpu().eval()
+            if self.policy_networks is not None:
+                policy_network = random.choice(self.policy_networks)
+                if policy_network.num_steps != self.eval_net_age:
+                    self.eval_net_age = policy_network.num_steps
+                    self.eval_net = copy.deepcopy(policy_network).cpu().eval()
             gr = start_traverse(
                 ng,
                 self.eval_net,
@@ -79,14 +83,18 @@ class GameSimulationIterator:
 
 
 class GameSimulationDataset(IterableDataset):
-    def __init__(self, game: GameInterface, max_games: int, policy_networks):
-        self.max_games = max_games
+    def __init__(
+        self, game: GameInterface, minibatches_per_epoch: int, policy_networks
+    ):
+        self.minibatches_per_epoch = minibatches_per_epoch
         self.game = game.clone()
         self.policy_networks = policy_networks
 
     def __iter__(self):
-        gsi = GameSimulationIterator(self.game, self.max_games, self.policy_networks)
+        gsi = GameSimulationIterator(
+            self.game, self.minibatches_per_epoch, self.policy_networks
+        )
         return gsi
 
-    def __len__(self):
-        return self.max_games
+    # def __len__(self):
+    # return self.minibatches_per_epoch

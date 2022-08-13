@@ -3,6 +3,7 @@
 
 # torch models
 *.torch
+*.pt
 lightning_logs
 
 # Byte-compiled / optimized / DLL files
