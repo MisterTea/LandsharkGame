@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import numpy as np
 import pytorch_lightning as pl
 import torch
+import torch_optimizer
 from engine.game_interface import GameInterface
 from torch import multiprocessing
 from utils.profiler import Profiler
@@ -230,15 +231,12 @@ class ActorCritic(torch.nn.Module):
             # advantage_loss = torch.nn.LeakyReLU()(advantage).sum(dim=1, keepdim=True)
             advantage_loss = advantage_loss.mean()
 
-            entropy = (
-                torch.sum(
-                    -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
-                    dim=1,
-                    keepdim=True,
-                )
-                / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
-                    min=1e-6
-                )
+            entropy = torch.sum(
+                -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
+                dim=1,
+                keepdim=True,
+            ) / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
+                min=1e-6
             )
             assert (
                 (entropy > 1.01).sum() + (entropy < -0.01).sum()
@@ -329,14 +327,16 @@ def test_actors(game, epoch: int, actor_critics):
                     )
                 test_actor_params.append([game, actor, opponent_policy, current_epoch])
             p.starmap(test_actor, test_actor_params, 1)
+    p.terminate()
 
 
 class TorchSaveCallback(pl.Callback):
     def on_epoch_end(self, trainer, pl_module):
         epoch = trainer.current_epoch
-        for i, actor_critic in enumerate(pl_module.actor_critics):
-            torch.save(actor_critic, f"models/MAC_ActorCritic_{epoch}_{i}.torch")
-        test_actors(pl_module.game, epoch, pl_module.actor_critics)
+        # for i, actor_critic in enumerate(pl_module.actor_critics):
+        # torch.save(actor_critic, f"models/MAC_ActorCritic_{epoch}_{i}.torch")
+        # test_actors(pl_module.game, epoch, pl_module.actor_critics)
+        torch.save(pl_module.model, f"models/StateValue_{epoch}.torch")
 
 
 NUM_PARALLEL_MODELS = 1
@@ -408,3 +408,123 @@ class MeanActorCritic(pl.LightningModule):
                 on_step=True,
             )
         return retval
+
+
+class StateValueModel(torch.nn.Module):
+    def __init__(self, feature_dim: int, num_players: int):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_players = num_players
+
+        self.trunk = torch.nn.Sequential(
+            torch.nn.Linear(self.feature_dim, 128),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(128, 128),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(128, 64),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(64, num_players),
+            torch.nn.Identity(),
+        )
+
+    def get_value_logits(self, inputs):
+        inputs = inputs.detach()
+
+        x = self.trunk(inputs)
+        return x
+
+    def forward(self, inputs):
+        torch.nn.Softmax(dim=1)(self.get_value_logits(inputs))
+
+    def get_loss(self, batch_list, batch_idx):
+        batch = GameRollout(*[x[0] for x in batch_list])
+        state_values = self.get_value_logits(batch.states)
+
+        winners = torch.argmax(batch.payoffs, 1, keepdim=False)
+        loss = torch.nn.CrossEntropyLoss()(state_values, winners)
+
+        return loss
+
+    def training_step(self, batch_list: List[torch.Tensor], batch_idx):
+        loss = self.get_loss(batch_list, batch_idx)
+        return {
+            "loss": loss,
+        }
+
+    def validation_step(self, batch_list: List[torch.Tensor], batch_idx):
+        loss = self.get_loss(batch_list, batch_idx)
+        return {
+            "val_loss": loss,
+        }
+
+
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+
+
+class StateValueLightning(pl.LightningModule):
+    def __init__(self, game: GameInterface):
+        super().__init__()
+        self.game = game
+        self.model = StateValueModel(game.feature_dim(), game.num_players)
+
+    def forward(self, inputs):
+        self.model.forward(inputs)
+
+    def train_model(self, train_dataset, val_dataset, output_file=None):
+        trainer = pl.Trainer(
+            accelerator="gpu",
+            devices=1,
+            # show_progress_bar=False,
+            max_epochs=1000,
+            # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
+            # val_check_interval=train_dataset.max_games,
+            callbacks=[
+                TorchSaveCallback(),
+                EarlyStopping(monitor="val_loss", mode="min", patience=10),
+            ],
+            # auto_lr_find=True,
+            # num_sanity_val_steps=0,
+        )
+        train_loader = torch.utils.data.DataLoader(train_dataset, pin_memory=True)
+        val_loader = torch.utils.data.DataLoader(val_dataset, pin_memory=True)
+        with Profiler(True):
+            trainer.fit(
+                self, train_dataloaders=train_loader, val_dataloaders=val_loader
+            )
+        if output_file is not None:
+            trainer.save_checkpoint(output_file)
+
+    def configure_optimizers(self):
+        # optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        # optimizer = torch.optim.AdamW(self.parameters(), lr=5e-5)
+
+        # optimizer = torch.optim.SGD(self.parameters(), lr=0.001)
+
+        optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.1)
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, factor=0.5, patience=2, verbose=True
+                ),
+                "monitor": "loss",
+                "frequency": 1
+                # If "monitor" references validation metrics, then "frequency" should be set to a
+                # multiple of "trainer.check_val_every_n_epoch".
+            },
+        }
+
+    def training_step(self, batch, batch_idx):
+        train_loss_dict = self.model.training_step(batch, batch_idx)
+        # print("TRAIN",train_loss_dict)
+        self.log("loss", train_loss_dict["loss"])
+        # train_loss_dict["progress_bar"] = copy.deepcopy(train_loss_dict)
+        return train_loss_dict
+
+    def validation_step(self, batch, batch_idx):
+        val_loss_dict = self.model.validation_step(batch, batch_idx)
+        # print("VAL",val_loss_dict)
+        self.log("val_loss", val_loss_dict["val_loss"], prog_bar=True)
+        # val_loss_dict["progress_bar"] = copy.deepcopy(val_loss_dict)
+        return val_loss_dict

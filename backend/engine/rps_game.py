@@ -12,7 +12,7 @@ import torch
 from engine.game_interface import GameInterface
 
 
-class RpsGame(GameInterface):
+class Game(GameInterface):
     class ActionName(IntEnum):
         ROCK = 0
         PAPER = 1
@@ -20,14 +20,14 @@ class RpsGame(GameInterface):
         LOSE = 3
 
     def __init__(self):
-        NUM_ACTIONS = len(RpsGame.ActionName)
+        NUM_ACTIONS = len(Game.ActionName)
 
         self.payoff_matrix = torch.zeros(
             (NUM_ACTIONS, NUM_ACTIONS, 2), dtype=torch.float
         )
 
-        for a1 in RpsGame.ActionName:
-            for a2 in RpsGame.ActionName:
+        for a1 in Game.ActionName:
+            for a2 in Game.ActionName:
                 if (int(a1) + 1) % 3 == int(a2):
                     self.payoff_matrix[a1, a2, 0] = -1
                     self.payoff_matrix[a1, a2, 1] = 1
@@ -41,12 +41,12 @@ class RpsGame(GameInterface):
                     self.payoff_matrix[a1, a2, 1] = 0
                     # print(a2, "ties", a1)
 
-                if a1 == RpsGame.ActionName.LOSE and a2 == RpsGame.ActionName.LOSE:
+                if a1 == Game.ActionName.LOSE and a2 == Game.ActionName.LOSE:
                     self.payoff_matrix[a1, a2, :] = -10
-                elif a1 == RpsGame.ActionName.LOSE:
+                elif a1 == Game.ActionName.LOSE:
                     self.payoff_matrix[a1, a2, 0] = -10
                     self.payoff_matrix[a1, a2, 1] = 1
-                elif a2 == RpsGame.ActionName.LOSE:
+                elif a2 == Game.ActionName.LOSE:
                     self.payoff_matrix[a1, a2, 0] = 1
                     self.payoff_matrix[a1, a2, 1] = -10
 
@@ -60,13 +60,13 @@ class RpsGame(GameInterface):
         return 2
 
     def clone(self):
-        return deepcopy(self)
+        return copy.deepcopy(self)
 
     def reset(self):
         self.actions = [-1] * self.num_players
 
     def action_dim(self):
-        return len(RpsGame.ActionName)
+        return len(Game.ActionName)
 
     def terminal(self):
         return self.get_player_to_act() == -1
@@ -75,10 +75,10 @@ class RpsGame(GameInterface):
         return self.payoff_matrix[self.actions[0], self.actions[1]]
 
     def get_one_hot_actions(self, hacks):
-        return torch.ones((len(RpsGame.ActionName),), dtype=torch.float)
+        return torch.ones((len(Game.ActionName),), dtype=torch.float)
 
     def getPossibleActions(self):
-        return list(range(len(RpsGame.ActionName)))
+        return list(range(len(Game.ActionName)))
 
     def populate_features(self, features: torch.Tensor):
         features.fill_(1.0)

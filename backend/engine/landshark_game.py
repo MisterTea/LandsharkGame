@@ -188,14 +188,15 @@ class GameState:
         else:
             if self.phase == GamePhase.BUYING_HOUSES:
                 if hacks:
+                    prop_spread = self.getPropertySpread()
                     for a in actions:
                         # HACK: Do not ever bid more than the spread/2
-                        if (a * 2) <= self.getPropertySpread():
+                        if (a * 2) <= prop_spread:
                             actions_one_hot[1 + a] = 1
                 else:
-                    actions_one_hot[1 + torch.LongTensor(actions)] = 1
+                    actions_one_hot[1 + np.array(actions)] = 1
             elif self.phase == GamePhase.SELLING_HOUSES:
-                actions_one_hot[20 + (torch.LongTensor(actions) - 1)] = 1
+                actions_one_hot[20 + (np.array(actions) - 1)] = 1
             else:
                 assert False, "Oops"
         return actions_one_hot
@@ -293,15 +294,14 @@ class GameState:
         assert (
             cursor == self.feature_dim()
         ), f"Incorrect feature size: {cursor} {self.feature_dim()}"
+        assert features.min() >= 0.0
         return features
 
     def get_player_to_act(self):
         if self.phase == GamePhase.BUYING_HOUSES:
             return self.biddingPlayer
         elif self.phase == GamePhase.SELLING_HOUSES:
-            for i, player in enumerate(self.playerStates):
-                if self.propertyBid[i] == 0:
-                    return i
+            return np.argmin(self.propertyBid)
         else:
             assert False, "Oops"
         assert False, "Should never get here"
