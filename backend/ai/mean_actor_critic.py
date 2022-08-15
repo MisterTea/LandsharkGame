@@ -231,12 +231,15 @@ class ActorCritic(torch.nn.Module):
             # advantage_loss = torch.nn.LeakyReLU()(advantage).sum(dim=1, keepdim=True)
             advantage_loss = advantage_loss.mean()
 
-            entropy = torch.sum(
-                -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
-                dim=1,
-                keepdim=True,
-            ) / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
-                min=1e-6
+            entropy = (
+                torch.sum(
+                    -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
+                    dim=1,
+                    keepdim=True,
+                )
+                / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
+                    min=1e-6
+                )
             )
             assert (
                 (entropy > 1.01).sum() + (entropy < -0.01).sum()
@@ -336,7 +339,22 @@ class TorchSaveCallback(pl.Callback):
         # for i, actor_critic in enumerate(pl_module.actor_critics):
         # torch.save(actor_critic, f"models/MAC_ActorCritic_{epoch}_{i}.torch")
         # test_actors(pl_module.game, epoch, pl_module.actor_critics)
-        torch.save(pl_module.model, f"models/StateValue_{epoch}.torch")
+        os.makedirs(f"{trainer.logger.log_dir}/models", exist_ok=True)
+        torch.save(
+            pl_module.value, f"{trainer.logger.log_dir}/models/StateValue_{epoch}.torch"
+        )
+        torch.save(
+            pl_module.policy, f"{trainer.logger.log_dir}/models/Policy_{epoch}.torch"
+        )
+
+
+class ExitOnExceptionCallback(pl.Callback):
+    def on_exception(self, trainer, pl_module, exception):
+        print("GOT EXCEPTION")
+        print(exception)
+        import sys
+
+        sys.exit(1)
 
 
 NUM_PARALLEL_MODELS = 1
@@ -423,7 +441,7 @@ class StateValueModel(torch.nn.Module):
             torch.nn.LeakyReLU(),
             torch.nn.Linear(128, 64),
             torch.nn.LeakyReLU(),
-            torch.nn.Linear(64, num_players),
+            torch.nn.Linear(64, 1),
             torch.nn.Identity(),
         )
 
@@ -436,23 +454,138 @@ class StateValueModel(torch.nn.Module):
     def forward(self, inputs):
         torch.nn.Softmax(dim=1)(self.get_value_logits(inputs))
 
+    def get_action(self, game: GameInterface, features: torch.Tensor) -> int:
+        player_to_act = game.get_player_to_act()
+        actions = game.getPossibleActions()
+        scores = torch.zeros((len(actions)), dtype=torch.float)
+        for i, action in enumerate(actions):
+            g = copy.deepcopy(game)
+            g.act(player_to_act, action)
+            g.populate_features(features)
+            scores[i] = self.get_value_logits(features)[0][0]
+        # probs = torch.nn.Softmax()(scores)
+        action_to_play = actions[
+            int(torch.distributions.Categorical(logits=scores).sample().item())
+        ]
+        return action_to_play
+
     def get_loss(self, batch_list, batch_idx):
         batch = GameRollout(*[x[0] for x in batch_list])
         state_values = self.get_value_logits(batch.states)
 
-        winners = torch.argmax(batch.payoffs, 1, keepdim=False)
-        loss = torch.nn.CrossEntropyLoss()(state_values, winners)
+        player_to_act_wins = (torch.argmax(batch.payoffs, 1, keepdim=True) == 0).float()
+        # winners = torch.argmax(batch.payoffs, 1, keepdim=True)
+        # loss = torch.nn.CrossEntropyLoss()(state_values, winners)
+        loss = torch.nn.BCEWithLogitsLoss()(state_values, player_to_act_wins)
 
-        return loss
+        return state_values, loss
 
     def training_step(self, batch_list: List[torch.Tensor], batch_idx):
-        loss = self.get_loss(batch_list, batch_idx)
+        loss = self.get_loss(batch_list, batch_idx)[1]
         return {
             "loss": loss,
         }
 
     def validation_step(self, batch_list: List[torch.Tensor], batch_idx):
-        loss = self.get_loss(batch_list, batch_idx)
+        batch = GameRollout(*[x[0] for x in batch_list])
+        state_values, loss = self.get_loss(batch_list, batch_idx)
+        player_to_act_wins = (torch.argmax(batch.payoffs, 1, keepdim=True) == 0).bool()
+        win_probs = torch.nn.Sigmoid()(state_values)
+
+        model_targets = (win_probs > 0.5).bool()
+
+        true_positive = (
+            torch.logical_and(model_targets, player_to_act_wins).long().sum().item()
+        )
+        # true_negative = torch.logical_and(torch.logical_not(model_targets), torch.logical_not((player_to_act_wins))).long().sum().item()
+
+        false_positive = (
+            torch.logical_and(model_targets, torch.logical_not((player_to_act_wins)))
+            .long()
+            .sum()
+            .item()
+        )
+        false_negative = (
+            torch.logical_and(torch.logical_not(model_targets), player_to_act_wins)
+            .long()
+            .sum()
+            .item()
+        )
+        # print(
+        #     f"Precision: {float(true_positive) / (float(true_positive) + float(false_positive))} Recall: {float(true_positive) / (float(true_positive) + float(false_negative))}"
+        # )
+        # print(
+        #     f"Precision: {float(true_positive) / (float(true_positive) + float(false_positive))} Recall: {float(true_positive) / (float(true_positive) + float(false_negative))}"
+        # )
+
+        return {
+            "val_loss": loss,
+            "tp": float(true_positive),
+            "precision": float(true_positive)
+            / (float(true_positive) + float(false_positive)),
+            "recall": float(true_positive)
+            / (float(true_positive) + float(false_negative)),
+        }
+
+
+class ImitationLearningModel(torch.nn.Module):
+    def __init__(self, feature_dim: int, action_dim: int):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.action_dim = action_dim
+
+        self.trunk = torch.nn.Sequential(
+            torch.nn.Linear(self.feature_dim, 128),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(128, 128),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(128, 64),
+            torch.nn.LeakyReLU(),
+            torch.nn.Linear(64, action_dim),
+            torch.nn.Identity(),
+        )
+
+    def get_logits(self, inputs, possible_action_mask):
+        inputs = inputs.detach()
+        assert len(inputs.shape) == 2
+
+        x = self.trunk(inputs)
+
+        x[torch.logical_not(possible_action_mask)] = float("-inf")
+        return x
+
+    def forward(self, inputs, possible_action_mask):
+        torch.nn.Softmax(dim=1)(self.get_logits(inputs, possible_action_mask))
+
+    def get_action(self, game: GameInterface, features: torch.Tensor) -> int:
+        possible_actions = game.get_one_hot_actions().unsqueeze(0)
+        game.populate_features(features)
+        features = features.unsqueeze(0)
+        logits = self.get_logits(features, possible_actions)
+        action_taken = torch.argmax(logits, dim=1, keepdim=False)[0].item()
+        assert possible_actions[0][
+            action_taken
+        ], f"{possible_actions} doesn't have {action_taken}"
+        return action_taken
+
+    def get_loss(self, batch_list, batch_idx):
+        batch = GameRollout(*[x[0] for x in batch_list])
+        action_logits = self.get_logits(batch.states, batch.possible_actions)
+
+        action_taken = batch.actions.squeeze(dim=1)
+        loss = torch.nn.CrossEntropyLoss()(action_logits, action_taken)
+
+        return action_logits, loss
+
+    def training_step(self, batch_list: List[torch.Tensor], batch_idx):
+        loss = self.get_loss(batch_list, batch_idx)[1]
+        return {
+            "loss": loss,
+        }
+
+    def validation_step(self, batch_list: List[torch.Tensor], batch_idx):
+        _, loss = self.get_loss(batch_list, batch_idx)
+
         return {
             "val_loss": loss,
         }
@@ -465,20 +598,21 @@ class StateValueLightning(pl.LightningModule):
     def __init__(self, game: GameInterface):
         super().__init__()
         self.game = game
-        self.model = StateValueModel(game.feature_dim(), game.num_players)
+        self.value = StateValueModel(game.feature_dim(), game.num_players)
+        self.policy = ImitationLearningModel(game.feature_dim(), game.action_dim())
 
-    def forward(self, inputs):
-        self.model.forward(inputs)
-
-    def train_model(self, train_dataset, val_dataset, output_file=None):
+    def train_model(
+        self, train_dataset, val_dataset, num_workers: int, output_file=None
+    ):
         trainer = pl.Trainer(
             accelerator="gpu",
             devices=1,
             # show_progress_bar=False,
-            max_epochs=1000,
+            max_epochs=1,
             # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
             # val_check_interval=train_dataset.max_games,
             callbacks=[
+                ExitOnExceptionCallback(),
                 TorchSaveCallback(),
                 EarlyStopping(
                     monitor="val_loss", mode="min", patience=10, verbose=True
@@ -489,12 +623,18 @@ class StateValueLightning(pl.LightningModule):
             # resume_from_checkpoint="lightning_logs/version_125/"
         )
         train_loader = torch.utils.data.DataLoader(
-            train_dataset, pin_memory=True, num_workers=16, persistent_workers=True
+            train_dataset,
+            pin_memory=True,
+            num_workers=num_workers,
+            persistent_workers=True,
         )
         val_loader = torch.utils.data.DataLoader(
-            val_dataset, pin_memory=True, num_workers=16, persistent_workers=True
+            val_dataset,
+            pin_memory=True,
+            num_workers=num_workers,
+            persistent_workers=True,
         )
-        with Profiler(True):
+        with Profiler(False):
             trainer.fit(
                 self, train_dataloaders=train_loader, val_dataloaders=val_loader
             )
@@ -503,11 +643,11 @@ class StateValueLightning(pl.LightningModule):
 
     def configure_optimizers(self):
         # optimizer = torch.optim.Adam(self.parameters(), lr=0.1)
-        optimizer = torch.optim.AdamW(self.parameters(), lr=0.01)
+        # optimizer = torch.optim.AdamW(self.parameters(), lr=0.01)
 
         # optimizer = torch.optim.SGD(self.parameters(), lr=0.001)
 
-        # optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.05)
+        optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.01)
 
         return {
             "optimizer": optimizer,
@@ -523,15 +663,39 @@ class StateValueLightning(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        train_loss_dict = self.model.training_step(batch, batch_idx)
-        # print("TRAIN",train_loss_dict)
-        self.log("loss", train_loss_dict["loss"])
-        # train_loss_dict["progress_bar"] = copy.deepcopy(train_loss_dict)
-        return train_loss_dict
+        value_loss_dict = self.value.training_step(batch, batch_idx)
+        self.log("value_loss", value_loss_dict["loss"], prog_bar=True)
+        policy_loss_dict = self.policy.training_step(batch, batch_idx)
+        self.log("policy_loss", policy_loss_dict["loss"], prog_bar=True)
+        return {"loss": value_loss_dict["loss"] + policy_loss_dict["loss"]}
 
     def validation_step(self, batch, batch_idx):
-        val_loss_dict = self.model.validation_step(batch, batch_idx)
-        # print("VAL",val_loss_dict)
-        self.log("val_loss", val_loss_dict["val_loss"], prog_bar=True, on_epoch=True)
-        # val_loss_dict["progress_bar"] = copy.deepcopy(val_loss_dict)
-        return val_loss_dict
+        value_loss_dict = self.value.validation_step(batch, batch_idx)
+        self.log(
+            "value_val_loss", value_loss_dict["val_loss"], prog_bar=True, on_epoch=True
+        )
+        self.log("value_tp", value_loss_dict["tp"], prog_bar=True, on_epoch=True)
+        self.log(
+            "value_precision",
+            value_loss_dict["precision"],
+            prog_bar=True,
+            on_epoch=True,
+        )
+        self.log(
+            "value_recall", value_loss_dict["recall"], prog_bar=True, on_epoch=True
+        )
+
+        policy_loss_dict = self.policy.validation_step(batch, batch_idx)
+        self.log(
+            "policy_val_loss",
+            policy_loss_dict["val_loss"],
+            prog_bar=True,
+            on_epoch=True,
+        )
+
+        self.log(
+            "val_loss",
+            value_loss_dict["val_loss"] + policy_loss_dict["val_loss"],
+            on_epoch=True,
+        )
+        return {"val_loss": value_loss_dict["val_loss"] + policy_loss_dict["val_loss"]}

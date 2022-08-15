@@ -430,7 +430,9 @@ class Game(GameInterface):
             else:
                 # Raise
                 raiseAmount = action - self.moneyBid[self.biddingPlayer]
-                assert action > self.highestBid
+                assert (
+                    action > self.highestBid
+                ), f"Action is too low: {action} <= {self.highestBid} {self.getPossibleActions()} {self.get_one_hot_actions()}"
                 assert raiseAmount > 0 or (raiseAmount == 0 and self.highestBid == -1)
                 self.moneyBid[self.biddingPlayer] = action
                 self.money[self.biddingPlayer] -= raiseAmount
