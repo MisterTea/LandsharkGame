@@ -348,13 +348,20 @@ class TorchSaveCallback(pl.Callback):
         )
 
 
+GotException: bool = False
+
+
+def has_exception():
+    global GotException
+    return GotException
+
+
 class ExitOnExceptionCallback(pl.Callback):
     def on_exception(self, trainer, pl_module, exception):
         print("GOT EXCEPTION")
         print(exception)
-        import sys
-
-        sys.exit(1)
+        global GotException
+        GotException = True
 
 
 NUM_PARALLEL_MODELS = 1
@@ -642,12 +649,12 @@ class StateValueLightning(pl.LightningModule):
             trainer.save_checkpoint(output_file)
 
     def configure_optimizers(self):
-        # optimizer = torch.optim.Adam(self.parameters(), lr=0.1)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.1)
         # optimizer = torch.optim.AdamW(self.parameters(), lr=0.01)
 
         # optimizer = torch.optim.SGD(self.parameters(), lr=0.001)
 
-        optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.01)
+        # optimizer = torch_optimizer.Shampoo(self.parameters(), lr=0.01)
 
         return {
             "optimizer": optimizer,
