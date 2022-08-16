@@ -537,9 +537,9 @@ class StateValueModel(torch.nn.Module):
             "val_loss": loss,
             "tp": float(true_positive),
             "precision": float(true_positive)
-            / (float(true_positive) + float(false_positive)),
+            / (float(true_positive) + float(false_positive) + 1e-6),
             "recall": float(true_positive)
-            / (float(true_positive) + float(false_negative)),
+            / (float(true_positive) + float(false_negative) + 1e-6),
         }
 
 
