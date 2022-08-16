@@ -25,15 +25,15 @@ def main():
     NUM_VAL_BATCHES = 32
     NUM_WORKERS = 8
 
-    # current_value_network = None
-    # historical_policy_networks = []
+    current_value_network = None
+    historical_policy_networks = []
 
-    current_value_network = (
-        torch.load("lightning_logs/version_141/models/StateValue_0.torch").cpu().eval()
-    )
-    historical_policy_networks = [
-        torch.load("lightning_logs/version_141/models/Policy_0.torch").cpu().eval()
-    ]
+    # current_value_network = (
+    #     torch.load("lightning_logs/version_141/models/StateValue_0.torch").cpu().eval()
+    # )
+    # historical_policy_networks = [
+    #     torch.load("lightning_logs/version_141/models/Policy_0.torch").cpu().eval()
+    # ]
 
     for epoch in range(10):
         lit = StateValueLightning(game)

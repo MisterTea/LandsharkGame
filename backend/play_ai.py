@@ -2,18 +2,20 @@ import random
 
 import torch
 
-from engine.landshark_game import GamePhase, GameState
+from engine.landshark_game import Game, GamePhase
 
 if __name__ == "__main__":
-    tmpgs = GameState(4)
+    tmpgs = Game(4)
     # policy = RegretMatching.load_from_checkpoint("LandsharkAi.torch", feature_dim=tmpgs.feature_dim(), action_dim=tmpgs.action_dim())
-    policy = torch.load("models/MAC_ActorCritic.torch").cpu().eval()
-    print(policy)
+    policy_network = (
+        torch.load("lightning_logs/version_141/models/Policy_0.torch").cpu().eval()
+    )
+    print(policy_network)
     random.seed(1)
     for x in range(1000):
-        gameState = GameState(4)
+        gameState = Game(4)
         gameState.reset()
-        features = torch.zeros((1, gameState.feature_dim()), dtype=torch.float)
+        features = torch.zeros((gameState.feature_dim(),), dtype=torch.float)
         while not gameState.terminal():
             seatToAct = gameState.get_players_to_act()[0]
             possible_actions = gameState.getPossibleActions()
@@ -26,15 +28,13 @@ if __name__ == "__main__":
                 action = int(action_str)
                 gameState.playerAction(seatToAct, action)
             else:
-                gameState.populate_features(features[0])
-                possible_action_mask = gameState.get_one_hot_actions(True)
-                action_probs = policy(features, possible_action_mask.unsqueeze(0), False)[0]
-                action_index = int(
-                    torch.distributions.Categorical(action_probs).sample().item()
-                )
-                gameState.act(seatToAct, action_index)
+                action = policy_network.get_action(game=gameState, features=features)
+                gameState.act(gameState.get_player_to_act(), action)
         for i, player in enumerate(gameState.playerStates):
             playerScore = gameState.getScore(i)
             print(
-                "Player", i, "has a score: ", playerScore,
+                "Player",
+                i,
+                "has a score: ",
+                playerScore,
             )

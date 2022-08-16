@@ -81,7 +81,7 @@ class Game(GameInterface):
         for x in range(self.num_players):
             playerState = PlayerState()
             playerStates.append(playerState)
-        self.playerStates = tuple(playerStates)
+        self.playerStates: Tuple[PlayerState] = tuple(playerStates)
 
         # HACK: Reduce rounds to make training faster
         # self.money = np.array([5] * self.num_players, dtype=np.int)
@@ -145,7 +145,8 @@ class Game(GameInterface):
         elif self.phase == GamePhase.SELLING_HOUSES:
             print("Dollar Cards on auction: " + str(self.getDollarsOnAuction()))
             for i, player in enumerate(self.playerStates):
-                print("Player", i, "bid", self.propertyBid[i])
+                if self.propertyBid[i] > 0:
+                    print("Player", i, "bid", self.propertyBid[i])
 
     def action_dim(self):
         return 1 + 19 + 30  # fold, bet 0-18, bet 1-30 properties
@@ -205,7 +206,7 @@ class Game(GameInterface):
         # return 31 + 17 + (47 * self.num_players)
 
         # return 6 + 30 + 30 + 16 + 16 + (4 * self.num_players)
-        return 1 + 4 + 30 + 30 + 1 + 4 + (9 * self.num_players)
+        return (2 * self.num_players) + 1 + 4 + 30 + 30 + 1 + 4 + (9 * self.num_players)
 
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
@@ -215,6 +216,18 @@ class Game(GameInterface):
         cursor = 0
 
         if self.phase == GamePhase.BUYING_HOUSES:
+            features[cursor : cursor + self.num_players] = torch.roll(
+                torch.from_numpy(self.canBid), shifts=-self.get_player_to_act(), dims=0
+            )
+            cursor += self.num_players
+
+            features[cursor : cursor + self.num_players] = torch.roll(
+                torch.from_numpy(self.moneyBid),
+                shifts=-self.get_player_to_act(),
+                dims=0,
+            )
+            cursor += self.num_players
+
             features[cursor] = ((30 - self.onPropertyCard) // self.num_players) + 1
             cursor += 1
 
@@ -237,7 +250,7 @@ class Game(GameInterface):
 
             cursor += 30
         else:
-            cursor += 35
+            cursor += (2 * self.num_players) + 35
 
             if self.onDollarCard > 0:
                 t = torch.from_numpy(self.dollarCardsToDraw[2 : self.onDollarCard])

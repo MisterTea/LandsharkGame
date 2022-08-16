@@ -444,10 +444,18 @@ class StateValueModel(torch.nn.Module):
         self.trunk = torch.nn.Sequential(
             torch.nn.Linear(self.feature_dim, 128),
             torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(128),
+            #
             torch.nn.Linear(128, 128),
             torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(128),
+            torch.nn.Dropout(0.1),
+            #
             torch.nn.Linear(128, 64),
             torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(64),
+            torch.nn.Dropout(0.1),
+            #
             torch.nn.Linear(64, 1),
             torch.nn.Identity(),
         )
@@ -544,10 +552,18 @@ class ImitationLearningModel(torch.nn.Module):
         self.trunk = torch.nn.Sequential(
             torch.nn.Linear(self.feature_dim, 128),
             torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(128),
+            #
             torch.nn.Linear(128, 128),
             torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(128),
+            torch.nn.Dropout(0.1),
+            #
             torch.nn.Linear(128, 64),
             torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(64),
+            torch.nn.Dropout(0.1),
+            #
             torch.nn.Linear(64, action_dim),
             torch.nn.Identity(),
         )
@@ -615,7 +631,7 @@ class StateValueLightning(pl.LightningModule):
             accelerator="gpu",
             devices=1,
             # show_progress_bar=False,
-            max_epochs=1,
+            max_epochs=3,
             # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
             # val_check_interval=train_dataset.max_games,
             callbacks=[
@@ -649,7 +665,7 @@ class StateValueLightning(pl.LightningModule):
             trainer.save_checkpoint(output_file)
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.1)
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-1)
         # optimizer = torch.optim.AdamW(self.parameters(), lr=0.01)
 
         # optimizer = torch.optim.SGD(self.parameters(), lr=0.001)

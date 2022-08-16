@@ -19,7 +19,7 @@ from ai.types import GameRollout
 
 from .mean_actor_critic import ImitationLearningModel, StateValueModel
 
-GAMES_PER_MINIBATCH = 64
+GAMES_PER_MINIBATCH = 32
 
 
 class GameSimulationIterator:
