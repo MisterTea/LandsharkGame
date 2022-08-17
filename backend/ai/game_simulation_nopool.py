@@ -48,6 +48,9 @@ class GameSimulationIterator:
         self.eval_net_age = -1
         lowpriority()
 
+        torch.manual_seed(self.name.__hash__() + self.iter_count)
+        random.seed(self.name.__hash__() + self.iter_count)
+
         # print("ON ITERATOR", self.iter_count, self.cache_pathname)
         self.cached_results = []
         if os.path.exists(self.cache_pathname):
