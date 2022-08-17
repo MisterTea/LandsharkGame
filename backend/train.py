@@ -1,4 +1,7 @@
 #
+import os
+import shutil
+
 import pyximport
 
 pyximport.install(language_level=3)
@@ -38,13 +41,19 @@ def main():
     for epoch in range(10):
         lit = StateValueLightning(game)
 
+        if os.path.exists("game_cache"):
+            shutil.rmtree("game_cache")
+        os.mkdir("game_cache")
+
         train_dataset = GameSimulationDataset(
+            "train",
             game,
             NUM_TRAIN_BATCHES / NUM_WORKERS,
             current_value_network,
             historical_policy_networks,
         )
         val_dataset = GameSimulationDataset(
+            "val",
             game,
             NUM_VAL_BATCHES / NUM_WORKERS,
             current_value_network,

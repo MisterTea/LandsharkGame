@@ -631,7 +631,7 @@ class StateValueLightning(pl.LightningModule):
             accelerator="gpu",
             devices=1,
             # show_progress_bar=False,
-            max_epochs=3,
+            max_epochs=1000,
             # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
             # val_check_interval=train_dataset.max_games,
             callbacks=[
@@ -663,6 +663,9 @@ class StateValueLightning(pl.LightningModule):
             )
         if output_file is not None:
             trainer.save_checkpoint(output_file)
+
+        del train_loader
+        del val_loader
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-1)

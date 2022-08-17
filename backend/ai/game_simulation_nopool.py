@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import copy
+import os
+import pickle
 import random
 import time
 from collections import Counter
@@ -25,12 +27,15 @@ GAMES_PER_MINIBATCH = 32
 class GameSimulationIterator:
     def __init__(
         self,
+        name: str,
         game: GameInterface,
         minibatches_per_epoch: int,
         value_network: Optional[StateValueModel],
         policy_networks: List[ImitationLearningModel],
     ):
         super().__init__()
+        self.name = name
+        self.iter_count = torch.utils.data.get_worker_info().id
         self.on_game = 0
         self.game = game.clone()
         self.value_network = value_network
@@ -43,6 +48,21 @@ class GameSimulationIterator:
         self.eval_net_age = -1
         lowpriority()
 
+        # print("ON ITERATOR", self.iter_count, self.cache_pathname)
+        self.cached_results = []
+        if os.path.exists(self.cache_pathname):
+            with open(self.cache_pathname, "rb") as handle:
+                self.cached_results = pickle.load(handle)
+                assert len(self.cached_results) > 0
+            # print(f"LOADING FROM CACHE: {len(self.cached_results)}")
+            self.got_cache = True
+        else:
+            self.got_cache = False
+
+    @property
+    def cache_pathname(self):
+        return f"game_cache/games_{self.name}_{self.iter_count}.pkl"
+
     def __iter__(self):
         self.on_game = 0
         self.on_iter = 0
@@ -50,8 +70,16 @@ class GameSimulationIterator:
 
     def __next__(self):
         if self.on_iter == self.minibatches_per_epoch:
+            if self.got_cache == False:
+                with open(self.cache_pathname, "wb") as handle:
+                    pickle.dump(self.cached_results, handle)
             raise StopIteration
         self.on_iter += 1
+        if self.got_cache:
+            if len(self.cached_results) == 0:
+                raise StopIteration
+            retval = self.cached_results.pop(0)
+            return retval
         for x in range(GAMES_PER_MINIBATCH):
             self.on_game += 1
             # print("Starting", self.on_game)
@@ -78,7 +106,7 @@ class GameSimulationIterator:
             distance_to_payoff = torch.cat([gr.distance_to_payoff for gr in r])
             policy = torch.cat([gr.policy for gr in r])
 
-            return (
+            result_batch = (
                 states,
                 actions,
                 possible_actions,
@@ -88,22 +116,29 @@ class GameSimulationIterator:
                 policy,
             )
 
+            self.cached_results.append(result_batch)
+
+            return result_batch
+
 
 class GameSimulationDataset(IterableDataset):
     def __init__(
         self,
+        name: str,
         game: GameInterface,
         minibatches_per_epoch: int,
         value_network: Optional[StateValueModel],
         policy_networks: List[ImitationLearningModel],
     ):
         self.minibatches_per_epoch = minibatches_per_epoch
+        self.name = name
         self.game = game.clone()
         self.value_network = value_network
         self.policy_networks = policy_networks
 
     def __iter__(self):
         gsi = GameSimulationIterator(
+            self.name,
             self.game,
             self.minibatches_per_epoch,
             self.value_network,
