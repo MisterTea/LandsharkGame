@@ -757,7 +757,11 @@ class StateValueLightning(pl.LightningModule):
                 TorchSaveCallback(),
                 LearningRateMonitor(logging_interval="step"),
                 EarlyStopping(
-                    monitor="val_loss", mode="min", patience=10, verbose=True
+                    monitor="val_loss",
+                    min_delta=0.001,
+                    mode="min",
+                    patience=10,
+                    verbose=True,
                 ),
             ],
             # auto_lr_find=True,
