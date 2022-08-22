@@ -3,6 +3,7 @@
 import copy
 import multiprocessing
 import random
+import threading
 import time
 from collections import Counter
 from threading import Thread
@@ -28,7 +29,8 @@ def one_step_best_response(
     value_network: StateValueModel,
     policy_network: ImitationLearningModel,
 ) -> int:
-    features = torch.zeros((game.feature_dim(),), dtype=torch.float)
+    dense_features = torch.zeros((game.feature_dim(),), dtype=torch.float)
+    embedding_features = torch.zeros((game.embedding_dim(),), dtype=torch.int)
     player_to_act = game.get_player_to_act()
     actions = game.get_one_hot_actions()
 
@@ -47,7 +49,10 @@ def one_step_best_response(
         while not g.terminal() and g.get_player_to_act() != player_to_act:
             # Make opponent moves based on policy network
             action = get_action_from_imitator(
-                model=policy_network, game=g, features=features
+                model=policy_network,
+                game=g,
+                dense_features=dense_features,
+                embedding_features=embedding_features,
             )
             g.act(g.get_player_to_act(), action)
 
@@ -56,8 +61,10 @@ def one_step_best_response(
             score = float((torch.argmax(g.payoffs()) == player_to_act).item())
             # print("SCORE", score, g.payoffs(), player_to_act)
         else:
-            g.populate_features(features)
-            score = value_network.get_value_logits(features.unsqueeze(0))[0][0]
+            g.populate_features(dense_features, embedding_features)
+            score = value_network.get_value_logits(
+                dense_features.unsqueeze(0), embedding_features.unsqueeze(0)
+            )[0][0]
 
         if best_action == -1 or best_score < score:
             best_score = score
@@ -74,10 +81,11 @@ def traverse(
     policy_network: Optional[ImitationLearningModel],
     metrics: Counter,
     level: cython.int,
-):
+) -> GameRollout:
     if game.terminal():
         gr = GameRollout(
             torch.zeros((level, game.feature_dim()), dtype=torch.float),  # States
+            torch.zeros((level, game.embedding_dim()), dtype=torch.int),  # States
             torch.zeros((level, 1), dtype=torch.long),  # Actions
             torch.zeros(
                 (level, game.action_dim()), dtype=torch.int
@@ -96,8 +104,9 @@ def traverse(
     if metrics["visit"] % 100000 == 0:
         print("Visits", metrics["visit"])
 
-    features = torch.zeros((game.feature_dim(),), dtype=torch.float)
-    game.populate_features(features)
+    dense_features = torch.zeros((game.feature_dim(),), dtype=torch.float)
+    embedding_features = torch.zeros((game.embedding_dim(),), dtype=torch.int)
+    game.populate_features(dense_features, embedding_features)
     player_to_act = game.get_player_to_act()
     possible_actions = game.get_one_hot_actions(False)
     num_choices = possible_actions.sum()
@@ -137,7 +146,8 @@ def traverse(
             result.payoffs[level], shifts=-player_to_act, dims=0
         )
 
-        result.states[level] = features
+        result.dense_state_features[level] = dense_features
+        result.embedding_state_features[level] = embedding_features
         result.actions[level] = action_taken
         result.player_to_act[level] = player_to_act
         result.possible_actions[level] = possible_actions

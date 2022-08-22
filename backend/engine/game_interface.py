@@ -28,7 +28,9 @@ class GameInterface:
     def act(self, player: int, action: int):
         raise NotImplementedError()
 
-    def populate_features(self, features: torch.Tensor):
+    def populate_features(
+        self, dense_features: torch.Tensor, embedding_features: torch.Tensor
+    ):
         raise NotImplementedError()
 
     def get_player_to_act(self) -> int:

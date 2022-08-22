@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 import cython
 import numpy as np
 import torch
+from ai.types import GameEmbedding
 
 from engine.game_interface import GameInterface
 
@@ -45,16 +46,19 @@ class Game(GameInterface):
         "moneyBid",
         "canBid",
         "propertyBid",
+        "_embedding_dim",
     ]
 
     def __init__(self, num_players: int):
         self.num_players = num_players
         assert num_players <= 4 and num_players > 0
         self.reset()
+        self._embedding_dim = self.embeddings()[0]
 
     def __hash__(self):
         items_to_hash = [self.phase, self.biddingPlayer]
         items_to_hash.append(tuple(self.money))
+        items_to_hash.append(tuple(self.propertyBid))
         for p in self.playerStates:
             items_to_hash.append(tuple(p.propertyCards))
         if self.phase == GamePhase.BUYING_HOUSES:
@@ -101,7 +105,9 @@ class Game(GameInterface):
             self.onPropertyCard = 2 + (0 * 4)
             self.onDollarCard = self.onPropertyCard
 
+        # Pick a random player to start
         self.biddingPlayer = random.randint(0, self.num_players - 1)
+        # self.biddingPlayer = 0
 
         # Shuffle all the cards
         np.random.shuffle(self.propertyCardsToDraw)
@@ -208,109 +214,164 @@ class Game(GameInterface):
         # return 31 + 17 + (47 * self.num_players)
 
         # return 6 + 30 + 30 + 16 + 16 + (4 * self.num_players)
-        return (2 * self.num_players) + 1 + 4 + 30 + 30 + 1 + 4 + (9 * self.num_players)
+        return (2 * self.num_players) + 1 + 1 + (2 * self.num_players)
+
+    def embedding_dim(self):
+        return self._embedding_dim
+
+    def embeddings(self):
+        player_dollar_embeddings = []
+        for player_index in range(self.num_players):
+            player_dollar_start = (player_index * 9) + 1
+            player_dollar_end = (player_index * 9) + 1 + 7
+            player_dollar_embeddings.append((player_dollar_start, player_dollar_end))
+
+        cursor = 0
+        retval: Dict[str, GameEmbedding] = {}
+
+        retval["PropertyCardsForAuction"] = GameEmbedding(
+            31,
+            [
+                (cursor, cursor + 4),
+            ],
+        )
+        cursor += 4
+
+        retval["PropertyCardsAlreadyPlayed"] = GameEmbedding(
+            31,
+            [
+                (cursor, cursor + 30),
+            ],
+        )
+        cursor += 30
+
+        retval["DollarCardsForAuction"] = GameEmbedding(
+            17,
+            [
+                (cursor, cursor + 4),
+            ],
+        )
+        cursor += 4
+
+        retval["DollarCardsAlreadyPlayed"] = GameEmbedding(
+            17,
+            [
+                (cursor, cursor + 30),
+            ],
+        )
+        cursor += 30
+
+        retval["OwnedProperties"] = GameEmbedding(31, [])
+        for player_index in range(self.num_players):
+            retval["OwnedProperties"].ranges.append((cursor, cursor + 7))
+            cursor += 7
+
+        return cursor, retval
 
     def getPropertySpread(self):
         a = self.getPropertyOnAuction()
         return int(a.max() - a.min())
 
-    def populate_features(self, features: torch.Tensor):
-        cursor = 0
+    def populate_features(
+        self, dense_features: torch.Tensor, embedding_features: torch.Tensor
+    ):
+        dense_cursor = 0
+        embedding_cursor = 0
+        dense_features.fill_(0)
+        embedding_features.fill_(0)
 
         if self.phase == GamePhase.BUYING_HOUSES:
-            features[cursor : cursor + self.num_players] = torch.roll(
+            dense_features[dense_cursor : dense_cursor + self.num_players] = torch.roll(
                 torch.from_numpy(self.canBid), shifts=-self.get_player_to_act(), dims=0
             )
-            cursor += self.num_players
+            dense_cursor += self.num_players
 
-            features[cursor : cursor + self.num_players] = torch.roll(
+            dense_features[dense_cursor : dense_cursor + self.num_players] = torch.roll(
                 torch.from_numpy(self.moneyBid),
                 shifts=-self.get_player_to_act(),
                 dims=0,
             )
-            cursor += self.num_players
+            dense_cursor += self.num_players
 
-            features[cursor] = ((30 - self.onPropertyCard) // self.num_players) + 1
-            cursor += 1
+            dense_features[dense_cursor] = (
+                (30 - self.onPropertyCard) // self.num_players
+            ) + 1
+            dense_cursor += 1
 
             p = self.getPropertyOnAuction()
-            # features[cursor] = float(p[0])
-            # features[cursor + 1] = float(p[-1])
-            # cursor += 2
-
             t = torch.from_numpy(p).long()
-            features[cursor : cursor + t.size()[0]] = t
-            cursor += 4
+            embedding_features[embedding_cursor : embedding_cursor + t.size()[0]] = t
+            embedding_cursor += 4
 
-            if self.onPropertyCard > 0:
+            if self.onPropertyCard > 2:
                 t = torch.from_numpy(
                     self.propertyCardsToDraw[2 : self.onPropertyCard]
                 ).long()
                 assert t.size()[0] <= 30
-                features[cursor : cursor + t.size()[0]] = t
-            cursor += 30
+                embedding_features[
+                    embedding_cursor : embedding_cursor + t.size()[0]
+                ] = t
+            embedding_cursor += 30
 
-            cursor += 30
+            embedding_cursor += 30
         else:
-            cursor += (2 * self.num_players) + 35
+            dense_cursor += (2 * self.num_players) + 1
+            embedding_cursor += 4 + 30
 
             if self.onDollarCard > 0:
                 t = torch.from_numpy(self.dollarCardsToDraw[2 : self.onDollarCard])
                 assert t.size()[0] <= 30
-                features[cursor : cursor + t.size()[0]] = t
-            cursor += 30
+                embedding_features[
+                    embedding_cursor : embedding_cursor + t.size()[0]
+                ] = t
+            embedding_cursor += 30
 
         if self.phase == GamePhase.SELLING_HOUSES:
-            features[cursor] = (30 - self.onDollarCard) // self.num_players
-            cursor += 1
+            dense_features[dense_cursor] = (30 - self.onDollarCard) // self.num_players
+            dense_cursor += 1
 
             d = self.getDollarsOnAuction()
-            # features[cursor] = float(d[0])
-            # features[cursor + 1] = float(d[-1])
-            # cursor += 2
 
             t = torch.from_numpy(d).long()
-            features[cursor : cursor + t.size()[0]] = t
-            cursor += 4
-            # dollars, counts = torch.unique(t, return_counts=True)
-            # features[dollars.long() + cursor] = counts.float()
-            # cursor += 16
+            embedding_features[embedding_cursor : embedding_cursor + t.size()[0]] = t
+            embedding_cursor += 4
         else:
-            cursor += 5
+            dense_cursor += 1
+            embedding_cursor += 4
 
         player_index = self.get_player_to_act()
         while True:
             # print("On Player", player_index)
             player = self.playerStates[player_index]
 
-            features[cursor] = int(self.money[player_index])
-            cursor += 1
+            dense_features[dense_cursor] = int(self.money[player_index])
+            dense_cursor += 1
 
             if len(player.propertyCards) > 0:
                 t = torch.tensor(player.propertyCards, dtype=torch.long)
                 assert t.size()[0] <= 7
-                features[cursor : cursor + t.size()[0]] = t
-            cursor += 7
-
-            # if len(player.propertyCards) > 0:
-            #    features[cursor] = float(min(player.propertyCards))
-            #    features[cursor + 1] = float(max(player.propertyCards))
-            # cursor += 2
+                embedding_features[
+                    embedding_cursor : embedding_cursor + t.size()[0]
+                ] = t
+            embedding_cursor += 7
 
             if len(player.dollarCards) > 0:
-                features[cursor] = float(sum(player.dollarCards))
+                dense_features[dense_cursor] = float(sum(player.dollarCards))
 
-            cursor += 1
+            dense_cursor += 1
 
             player_index = (player_index + 1) % self.num_players
             if player_index == self.get_player_to_act():
                 break
 
         assert (
-            cursor == self.feature_dim()
-        ), f"Incorrect feature size: {cursor} {self.feature_dim()}"
-        assert features.min() >= 0.0
-        return features
+            dense_cursor == self.feature_dim()
+        ), f"Incorrect feature size: {dense_cursor} {self.feature_dim()}"
+        assert (
+            embedding_cursor == self.embedding_dim()
+        ), f"Incorrect feature size: {embedding_cursor} {self.embedding_dim()}"
+        assert dense_features.min() >= 0.0
+        return None
 
     def get_player_to_act(self):
         if self.phase == GamePhase.BUYING_HOUSES:

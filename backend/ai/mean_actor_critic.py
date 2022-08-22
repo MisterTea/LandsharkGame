@@ -16,7 +16,7 @@ from engine.game_interface import GameInterface
 from torch import multiprocessing
 from utils.profiler import Profiler
 
-from ai.types import GameRollout
+from ai.types import GameEmbedding, GameRollout
 
 
 def masked_softmax(x, mask, temperature):
@@ -37,17 +37,17 @@ class ActorCritic(torch.nn.Module):
         self.feature_dim = feature_dim
         self.action_dim = action_dim
 
-        self.player_property_embedding = torch.nn.Embedding(31, 16)
+        self.player_property_embedding = torch.nn.Embedding(31, 16, padding_idx=0)
 
         self.player_embedding = torch.nn.Sequential(
             torch.nn.Linear(18, 16), torch.nn.LeakyReLU()
         )
 
-        self.bidding_property_embedding = torch.nn.Embedding(31, 16)
-        self.property_consumed_embedding = torch.nn.Embedding(31, 16)
+        self.bidding_property_embedding = torch.nn.Embedding(31, 16, padding_idx=0)
+        self.property_consumed_embedding = torch.nn.Embedding(31, 16, padding_idx=0)
 
-        self.bidding_dollar_embedding = torch.nn.Embedding(17, 16)
-        self.dollar_consumed_embedding = torch.nn.Embedding(17, 16)
+        self.bidding_dollar_embedding = torch.nn.Embedding(17, 16, padding_idx=0)
+        self.dollar_consumed_embedding = torch.nn.Embedding(17, 16, padding_idx=0)
 
         self.shared = torch.nn.Sequential(
             (torch.nn.Linear(98, 64)),
@@ -435,15 +435,38 @@ class MeanActorCritic(pl.LightningModule):
         return retval
 
 
-class StateValueModel(torch.nn.Module):
-    def __init__(self, feature_dim: int, num_players: int):
+class GameStateTrunk(torch.nn.Module):
+    def __init__(self, game: GameInterface):
         super().__init__()
-        self.feature_dim = feature_dim
-        self.num_players = num_players
+        self.feature_dim = game.feature_dim()
+        self.num_players = game.num_players
         self.sigmoid = torch.nn.Sigmoid()
 
+        emb = game.embeddings()[1]
+        emb_info: List[List[Tuple[int, int]]] = []
+
+        self.embeddings = torch.nn.ModuleList()
+        self.emb_size = 0
+        for k, v in emb.items():
+            emb_info.append(v.ranges)
+            self.emb_size += 64 * len(v.ranges)
+            self.embeddings.append(
+                torch.nn.EmbeddingBag(v.cardinality, embedding_dim=64, padding_idx=0)
+            )
+
+        self.emb_info: Tuple[List[Tuple[int, int]], ...] = tuple(emb_info)
+
+        self.embedding_range_pairs = tuple(zip(self.embeddings, self.emb_info))
+
+        self.dense = torch.nn.Sequential(
+            torch.nn.Linear(self.feature_dim, 64),
+            torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(64),
+            #
+        )
+
         self.trunk = torch.nn.Sequential(
-            torch.nn.Linear(self.feature_dim, 128),
+            torch.nn.Linear(64 + self.emb_size, 128),
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm1d(128),
             #
@@ -452,6 +475,39 @@ class StateValueModel(torch.nn.Module):
             torch.nn.BatchNorm1d(128),
             torch.nn.Dropout(0.1),
             #
+        )
+
+    def forward(self, dense_features, embedding_features):
+        dense_features, embedding_features = (
+            dense_features.detach(),
+            embedding_features.detach(),
+        )
+        assert len(dense_features.shape) == 2
+        assert len(embedding_features.shape) == 2
+
+        inputs_to_trunk = [self.dense(dense_features)]
+        for (embedding, emb_ranges) in self.embedding_range_pairs:
+            for emb_range in emb_ranges:
+                inputs_to_trunk.append(
+                    embedding(embedding_features[:, emb_range[0] : emb_range[1]])
+                )
+
+        x = self.trunk(torch.cat(inputs_to_trunk, dim=1))
+
+        return x
+
+
+class StateValueModel(torch.nn.Module):
+    def __init__(self, game: GameInterface):
+        super().__init__()
+
+        self.game_state_trunk = GameStateTrunk(game)
+
+        self.feature_dim = game.feature_dim()
+        self.num_players = game.num_players
+        self.sigmoid = torch.nn.Sigmoid()
+
+        self.trunk = torch.nn.Sequential(
             torch.nn.Linear(128, 64),
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm1d(64),
@@ -462,24 +518,30 @@ class StateValueModel(torch.nn.Module):
         )
 
     @torch.jit.export
-    def get_value_logits(self, inputs):
-        inputs = inputs.detach()
+    def get_value_logits(self, dense_features, embedding_features):
+        x = self.game_state_trunk(dense_features, embedding_features)
 
-        x = self.trunk(inputs)
+        x = self.trunk(x)
+
         return x
 
-    def forward(self, inputs):
-        self.sigmoid(self.get_value_logits(inputs))
+    def forward(self, dense_features, embedding_features):
+        self.sigmoid(self.get_value_logits(dense_features, embedding_features))
 
-    def get_action(self, game: GameInterface, features: torch.Tensor) -> int:
+    def get_action(
+        self,
+        game: GameInterface,
+        dense_features: torch.Tensor,
+        embedding_features: torch.Tensor,
+    ) -> int:
         player_to_act = game.get_player_to_act()
         actions = game.getPossibleActions()
         scores = torch.zeros((len(actions)), dtype=torch.float)
         for i, action in enumerate(actions):
             g = copy.deepcopy(game)
             g.act(player_to_act, action)
-            g.populate_features(features)
-            scores[i] = self.get_value_logits(features)[0][0]
+            g.populate_features(dense_features, embedding_features)
+            scores[i] = self.get_value_logits(dense_features, embedding_features)[0][0]
         # probs = torch.nn.Softmax()(scores)
         action_to_play = actions[
             int(torch.distributions.Categorical(logits=scores).sample().item())
@@ -488,7 +550,9 @@ class StateValueModel(torch.nn.Module):
 
     def get_loss(self, batch_list, batch_idx):
         batch = GameRollout(*[x[0] for x in batch_list])
-        state_values = self.get_value_logits(batch.states)
+        state_values = self.get_value_logits(
+            batch.dense_state_features, batch.embedding_state_features
+        )
 
         player_to_act_wins = (
             torch.argmax(batch.payoffs, dim=1, keepdim=True) == 0
@@ -556,47 +620,52 @@ class StateValueModel(torch.nn.Module):
 
 
 class ImitationLearningModel(torch.nn.Module):
-    def __init__(self, feature_dim: int, action_dim: int):
+    def __init__(self, game: GameInterface):
         super().__init__()
-        self.feature_dim = feature_dim
-        self.action_dim = action_dim
+        self.feature_dim = game.feature_dim()
+        self.action_dim = game.action_dim()
         self.softmax = torch.nn.Softmax(dim=1)
 
+        self.game_state_trunk = GameStateTrunk(game)
+
         self.trunk = torch.nn.Sequential(
-            torch.nn.Linear(self.feature_dim, 128),
-            torch.nn.LeakyReLU(),
-            torch.nn.BatchNorm1d(128),
-            #
-            torch.nn.Linear(128, 128),
-            torch.nn.LeakyReLU(),
-            torch.nn.BatchNorm1d(128),
-            torch.nn.Dropout(0.1),
-            #
             torch.nn.Linear(128, 64),
             torch.nn.LeakyReLU(),
             torch.nn.BatchNorm1d(64),
             torch.nn.Dropout(0.1),
             #
-            torch.nn.Linear(64, action_dim),
+            torch.nn.Linear(64, self.action_dim),
             torch.nn.Identity(),
         )
 
     @torch.jit.export
-    def get_logits(self, inputs, possible_action_mask):
-        inputs = inputs.detach()
-        assert len(inputs.shape) == 2
+    def get_logits(self, dense_features, embedding_features, possible_action_mask):
+        dense_features, embedding_features = (
+            dense_features.detach(),
+            embedding_features.detach(),
+        )
+        assert len(dense_features.shape) == 2
+        assert len(embedding_features.shape) == 2
 
-        x = self.trunk(inputs)
+        x = self.game_state_trunk(dense_features, embedding_features)
+
+        x = self.trunk(x)
 
         x[torch.logical_not(possible_action_mask.detach())] = float("-inf")
         return x
 
-    def forward(self, inputs, possible_action_mask):
-        return self.softmax(self.get_logits(inputs, possible_action_mask))
+    def forward(self, dense_features, embedding_features, possible_action_mask):
+        return self.softmax(
+            self.get_logits(dense_features, embedding_features, possible_action_mask)
+        )
 
     def get_loss(self, batch_list, batch_idx):
         batch = GameRollout(*[x[0] for x in batch_list])
-        action_logits = self.get_logits(batch.states, batch.possible_actions)
+        action_logits = self.get_logits(
+            batch.dense_state_features,
+            batch.embedding_state_features,
+            batch.possible_actions,
+        )
 
         action_taken = batch.actions.squeeze(dim=1)
         loss = torch.nn.CrossEntropyLoss()(action_logits, action_taken)
@@ -643,14 +712,20 @@ class ImitationLearningModel(torch.nn.Module):
 
 
 def get_action_from_imitator(
-    model: ImitationLearningModel, game: GameInterface, features: torch.Tensor
+    model: ImitationLearningModel,
+    game: GameInterface,
+    dense_features: torch.Tensor,
+    embedding_features: torch.Tensor,
 ) -> int:
-    possible_actions = game.get_one_hot_actions().unsqueeze(0)
-    game.populate_features(features)
-    features = features.unsqueeze(0)
-    logits = model.get_logits(features, possible_actions)
+    possible_actions = game.get_one_hot_actions()
+    game.populate_features(dense_features, embedding_features)
+    logits = model.get_logits(
+        dense_features.unsqueeze(0),
+        embedding_features.unsqueeze(0),
+        possible_actions.unsqueeze(0),
+    )
     action_taken = torch.argmax(logits, dim=1, keepdim=False)[0].item()
-    assert possible_actions[0][
+    assert possible_actions[
         action_taken
     ], f"{possible_actions} doesn't have {action_taken}"
     return action_taken
@@ -664,8 +739,8 @@ class StateValueLightning(pl.LightningModule):
     def __init__(self, game: GameInterface):
         super().__init__()
         self.game = game
-        self.value = StateValueModel(game.feature_dim(), game.num_players)
-        self.policy = ImitationLearningModel(game.feature_dim(), game.action_dim())
+        self.value = StateValueModel(game)
+        self.policy = ImitationLearningModel(game)
 
     def train_model(
         self, train_dataset, val_dataset, num_workers: int, output_file=None

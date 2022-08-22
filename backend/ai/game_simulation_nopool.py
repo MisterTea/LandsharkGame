@@ -46,7 +46,7 @@ class GameSimulationIterator:
         self.policy_networks = [load(p) for p in policy_network_bytes]
         self.minibatches_per_epoch = minibatches_per_epoch
         self.games_per_minibatch = games_per_minibatch
-        self.results = []
+        self.results: List[GameRollout] = []
         self.games_in_progress = []
         self.on_iter = 0
         self.eval_net = None
@@ -112,7 +112,10 @@ class GameSimulationIterator:
             self.results.append(gr)
         with torch.no_grad():
             r, self.results = self.results, []
-            states = torch.cat([gr.states for gr in r])
+            dense_state_features = torch.cat([gr.dense_state_features for gr in r])
+            embedding_state_features = torch.cat(
+                [gr.embedding_state_features for gr in r]
+            )
             actions = torch.cat([gr.actions for gr in r])
             possible_actions = torch.cat([gr.possible_actions for gr in r])
             player_to_act = torch.cat([gr.player_to_act for gr in r])
@@ -121,7 +124,8 @@ class GameSimulationIterator:
             policy = torch.cat([gr.policy for gr in r])
 
             result_batch = (
-                states,
+                dense_state_features,
+                embedding_state_features,
                 actions,
                 possible_actions,
                 player_to_act,
