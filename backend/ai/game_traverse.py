@@ -15,7 +15,11 @@ from torch.utils.data import IterableDataset
 from utils.priority import lowpriority
 from utils.profiler import Profiler
 
-from ai.mean_actor_critic import ImitationLearningModel, StateValueModel
+from ai.mean_actor_critic import (
+    ImitationLearningModel,
+    StateValueModel,
+    get_action_from_imitator,
+)
 from ai.types import GameRollout
 
 
@@ -42,7 +46,9 @@ def one_step_best_response(
 
         while not g.terminal() and g.get_player_to_act() != player_to_act:
             # Make opponent moves based on policy network
-            action = policy_network.get_action(game=g, features=features)
+            action = get_action_from_imitator(
+                model=policy_network, game=g, features=features
+            )
             g.act(g.get_player_to_act(), action)
 
         if g.terminal():
@@ -110,6 +116,9 @@ def traverse(
             print("Invalid strategy:", strategy)
 
         action_taken = int(action_dist.sample().item())
+
+        # Deterministic player to test imitation learning
+        # action_taken = int(possible_actions.argmax().item())
     else:
         strategy_without_exploration = None
         action_taken = one_step_best_response(game, value_network, policy_network)
@@ -135,6 +144,7 @@ def traverse(
         if strategy_without_exploration is not None:
             result.policy[level] = strategy_without_exploration
     else:
+        assert False, "Skipped actions should be forced in the game engine"
         # Don't advance the level, skip this non-choice
         result = traverse(
             game,

@@ -9,10 +9,12 @@ from collections import Counter
 from threading import Thread
 from typing import List, Optional
 
+import numpy as np
 import torch
 from engine.game_interface import GameInterface
 from torch import multiprocessing
 from torch.utils.data import IterableDataset
+from utils.model_serialization import load
 from utils.priority import lowpriority
 from utils.profiler import Profiler
 
@@ -21,8 +23,6 @@ from ai.types import GameRollout
 
 from .mean_actor_critic import ImitationLearningModel, StateValueModel
 
-GAMES_PER_MINIBATCH = 32
-
 
 class GameSimulationIterator:
     def __init__(
@@ -30,17 +30,22 @@ class GameSimulationIterator:
         name: str,
         game: GameInterface,
         minibatches_per_epoch: int,
-        value_network: Optional[StateValueModel],
-        policy_networks: List[ImitationLearningModel],
+        games_per_minibatch: int,
+        value_network_bytes: Optional[bytes],
+        policy_network_bytes: List[bytes],
     ):
         super().__init__()
         self.name = name
         self.iter_count = torch.utils.data.get_worker_info().id
         self.on_game = 0
         self.game = game.clone()
-        self.value_network = value_network
-        self.policy_networks = policy_networks
+        if value_network_bytes is not None:
+            self.value_network = load(value_network_bytes)
+        else:
+            self.value_network = None
+        self.policy_networks = [load(p) for p in policy_network_bytes]
         self.minibatches_per_epoch = minibatches_per_epoch
+        self.games_per_minibatch = games_per_minibatch
         self.results = []
         self.games_in_progress = []
         self.on_iter = 0
@@ -48,8 +53,10 @@ class GameSimulationIterator:
         self.eval_net_age = -1
         lowpriority()
 
-        torch.manual_seed(self.name.__hash__() + self.iter_count)
-        random.seed(self.name.__hash__() + self.iter_count)
+        name_mod_hash = self.name.__hash__() % (1024 * 1024)
+        torch.manual_seed(name_mod_hash + self.iter_count)
+        random.seed(name_mod_hash + self.iter_count)
+        np.random.seed(name_mod_hash + self.iter_count)
 
         # print("ON ITERATOR", self.iter_count, self.cache_pathname)
         self.cached_results = []
@@ -65,6 +72,10 @@ class GameSimulationIterator:
     @property
     def cache_pathname(self):
         return f"game_cache/games_{self.name}_{self.iter_count}.pkl"
+
+    @property
+    def game_metrics_pathname(self):
+        return f"game_metrics/games_{self.name}_{self.iter_count}.pkl"
 
     def __iter__(self):
         self.on_game = 0
@@ -83,7 +94,7 @@ class GameSimulationIterator:
                 raise StopIteration
             retval = self.cached_results.pop(0)
             return retval
-        for x in range(GAMES_PER_MINIBATCH):
+        for x in range(self.games_per_minibatch):
             self.on_game += 1
             # print("Starting", self.on_game)
             ng = self.game.clone()
@@ -130,12 +141,15 @@ class GameSimulationDataset(IterableDataset):
         name: str,
         game: GameInterface,
         minibatches_per_epoch: int,
+        games_per_minibatch: int,
         value_network: Optional[StateValueModel],
         policy_networks: List[ImitationLearningModel],
     ):
+        assert minibatches_per_epoch > 0
         self.minibatches_per_epoch = minibatches_per_epoch
         self.name = name
         self.game = game.clone()
+        self.games_per_minibatch = games_per_minibatch
         self.value_network = value_network
         self.policy_networks = policy_networks
 
@@ -144,6 +158,7 @@ class GameSimulationDataset(IterableDataset):
             self.name,
             self.game,
             self.minibatches_per_epoch,
+            self.games_per_minibatch,
             self.value_network,
             self.policy_networks,
         )

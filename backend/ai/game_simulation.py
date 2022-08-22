@@ -14,19 +14,23 @@ from torch import multiprocessing
 from torch.utils.data import IterableDataset
 from utils.profiler import Profiler
 
-from ai.game_simulation_nopool import GAMES_PER_MINIBATCH
 from ai.game_traverse import start_traverse
 from ai.types import GameRollout
 
 
 class GameSimulationIterator:
     def __init__(
-        self, game: GameInterface, minibatches_per_epoch: int, policy_networks
+        self,
+        game: GameInterface,
+        minibatches_per_epoch: int,
+        games_per_minibatch: int,
+        policy_networks,
     ):
         super().__init__()
         self.game = game.clone()
         self.policy_networks = policy_networks
         self.minibatches_per_epoch = minibatches_per_epoch
+        self.games_per_minibatch = games_per_minibatch
         self.pool = ThreadPool(4)
         self.games_in_progress = []
         self.on_iter = 0
@@ -34,7 +38,7 @@ class GameSimulationIterator:
         self.eval_net_age = -1
 
         # Spin up some games
-        for _ in range(GAMES_PER_MINIBATCH):
+        for _ in range(self.games_per_minibatch):
             # print("SPINNING UP GAMES")
             self.start_game()
 
@@ -79,7 +83,7 @@ class GameSimulationIterator:
         self.games_in_progress = []
         if self.on_iter + 1 < self.minibatches_per_epoch:
             # Spin up some games
-            for _ in range(GAMES_PER_MINIBATCH):
+            for _ in range(self.games_per_minibatch):
                 # print("SPINNING UP GAMES")
                 self.start_game()
 

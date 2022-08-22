@@ -440,6 +440,7 @@ class StateValueModel(torch.nn.Module):
         super().__init__()
         self.feature_dim = feature_dim
         self.num_players = num_players
+        self.sigmoid = torch.nn.Sigmoid()
 
         self.trunk = torch.nn.Sequential(
             torch.nn.Linear(self.feature_dim, 128),
@@ -460,6 +461,7 @@ class StateValueModel(torch.nn.Module):
             torch.nn.Identity(),
         )
 
+    @torch.jit.export
     def get_value_logits(self, inputs):
         inputs = inputs.detach()
 
@@ -467,7 +469,7 @@ class StateValueModel(torch.nn.Module):
         return x
 
     def forward(self, inputs):
-        torch.nn.Softmax(dim=1)(self.get_value_logits(inputs))
+        self.sigmoid(self.get_value_logits(inputs))
 
     def get_action(self, game: GameInterface, features: torch.Tensor) -> int:
         player_to_act = game.get_player_to_act()
@@ -488,24 +490,32 @@ class StateValueModel(torch.nn.Module):
         batch = GameRollout(*[x[0] for x in batch_list])
         state_values = self.get_value_logits(batch.states)
 
-        player_to_act_wins = (torch.argmax(batch.payoffs, 1, keepdim=True) == 0).float()
+        player_to_act_wins = (
+            torch.argmax(batch.payoffs, dim=1, keepdim=True) == 0
+        ).float()
+        assert player_to_act_wins.shape == batch.player_to_act.shape
         # winners = torch.argmax(batch.payoffs, 1, keepdim=True)
         # loss = torch.nn.CrossEntropyLoss()(state_values, winners)
         loss = torch.nn.BCEWithLogitsLoss()(state_values, player_to_act_wins)
 
         return state_values, loss
 
-    def training_step(self, batch_list: List[torch.Tensor], batch_idx):
-        loss = self.get_loss(batch_list, batch_idx)[1]
+    def training_step(
+        self, lightning_module, batch_list: List[torch.Tensor], batch_idx
+    ):
+        state_values, loss = self.get_loss(batch_list, batch_idx)
+        lightning_module.log("WinningProbs", self.sigmoid(state_values.detach()).mean())
         return {
             "loss": loss,
         }
 
-    def validation_step(self, batch_list: List[torch.Tensor], batch_idx):
+    def validation_step(
+        self, lightning_module, batch_list: List[torch.Tensor], batch_idx
+    ):
         batch = GameRollout(*[x[0] for x in batch_list])
         state_values, loss = self.get_loss(batch_list, batch_idx)
         player_to_act_wins = (torch.argmax(batch.payoffs, 1, keepdim=True) == 0).bool()
-        win_probs = torch.nn.Sigmoid()(state_values)
+        win_probs = self.sigmoid(state_values)
 
         model_targets = (win_probs > 0.5).bool()
 
@@ -533,6 +543,8 @@ class StateValueModel(torch.nn.Module):
         #     f"Precision: {float(true_positive) / (float(true_positive) + float(false_positive))} Recall: {float(true_positive) / (float(true_positive) + float(false_negative))}"
         # )
 
+        tensorboard = lightning_module.logger.experiment
+        tensorboard.add_pr_curve("StateValuePR", player_to_act_wins, win_probs)
         return {
             "val_loss": loss,
             "tp": float(true_positive),
@@ -548,6 +560,7 @@ class ImitationLearningModel(torch.nn.Module):
         super().__init__()
         self.feature_dim = feature_dim
         self.action_dim = action_dim
+        self.softmax = torch.nn.Softmax(dim=1)
 
         self.trunk = torch.nn.Sequential(
             torch.nn.Linear(self.feature_dim, 128),
@@ -568,28 +581,18 @@ class ImitationLearningModel(torch.nn.Module):
             torch.nn.Identity(),
         )
 
+    @torch.jit.export
     def get_logits(self, inputs, possible_action_mask):
         inputs = inputs.detach()
         assert len(inputs.shape) == 2
 
         x = self.trunk(inputs)
 
-        x[torch.logical_not(possible_action_mask)] = float("-inf")
+        x[torch.logical_not(possible_action_mask.detach())] = float("-inf")
         return x
 
     def forward(self, inputs, possible_action_mask):
-        torch.nn.Softmax(dim=1)(self.get_logits(inputs, possible_action_mask))
-
-    def get_action(self, game: GameInterface, features: torch.Tensor) -> int:
-        possible_actions = game.get_one_hot_actions().unsqueeze(0)
-        game.populate_features(features)
-        features = features.unsqueeze(0)
-        logits = self.get_logits(features, possible_actions)
-        action_taken = torch.argmax(logits, dim=1, keepdim=False)[0].item()
-        assert possible_actions[0][
-            action_taken
-        ], f"{possible_actions} doesn't have {action_taken}"
-        return action_taken
+        return self.softmax(self.get_logits(inputs, possible_action_mask))
 
     def get_loss(self, batch_list, batch_idx):
         batch = GameRollout(*[x[0] for x in batch_list])
@@ -600,13 +603,38 @@ class ImitationLearningModel(torch.nn.Module):
 
         return action_logits, loss
 
-    def training_step(self, batch_list: List[torch.Tensor], batch_idx):
-        loss = self.get_loss(batch_list, batch_idx)[1]
+    def training_step(
+        self, lightning_module, batch_list: List[torch.Tensor], batch_idx
+    ):
+        action_logits, loss = self.get_loss(batch_list, batch_idx)
+        batch = GameRollout(*[x[0] for x in batch_list])
+        possible_action_mask = batch.possible_actions
+        # tensorboard = lightning_module.logger.experiment
+        action_prob_lists = []
+        num_actions = self.action_dim
+        batch_size = action_logits.shape[0]
+
+        total_possible = possible_action_mask.float().sum(dim=0, keepdim=False) + 1e-6
+
+        lightning_module.log(
+            "ActionProbs",
+            dict(
+                [
+                    (f"Action_{i}", v.item())
+                    for i, v in enumerate(
+                        self.softmax(action_logits.detach()).sum(dim=0, keepdim=False)
+                        / total_possible
+                    )
+                ]
+            ),
+        )
         return {
             "loss": loss,
         }
 
-    def validation_step(self, batch_list: List[torch.Tensor], batch_idx):
+    def validation_step(
+        self, lightning_module, batch_list: List[torch.Tensor], batch_idx
+    ):
         _, loss = self.get_loss(batch_list, batch_idx)
 
         return {
@@ -614,6 +642,21 @@ class ImitationLearningModel(torch.nn.Module):
         }
 
 
+def get_action_from_imitator(
+    model: ImitationLearningModel, game: GameInterface, features: torch.Tensor
+) -> int:
+    possible_actions = game.get_one_hot_actions().unsqueeze(0)
+    game.populate_features(features)
+    features = features.unsqueeze(0)
+    logits = model.get_logits(features, possible_actions)
+    action_taken = torch.argmax(logits, dim=1, keepdim=False)[0].item()
+    assert possible_actions[0][
+        action_taken
+    ], f"{possible_actions} doesn't have {action_taken}"
+    return action_taken
+
+
+from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 
@@ -637,6 +680,7 @@ class StateValueLightning(pl.LightningModule):
             callbacks=[
                 ExitOnExceptionCallback(),
                 TorchSaveCallback(),
+                LearningRateMonitor(logging_interval="step"),
                 EarlyStopping(
                     monitor="val_loss", mode="min", patience=10, verbose=True
                 ),
@@ -689,14 +733,14 @@ class StateValueLightning(pl.LightningModule):
         }
 
     def training_step(self, batch, batch_idx):
-        value_loss_dict = self.value.training_step(batch, batch_idx)
+        value_loss_dict = self.value.training_step(self, batch, batch_idx)
         self.log("value_loss", value_loss_dict["loss"], prog_bar=True)
-        policy_loss_dict = self.policy.training_step(batch, batch_idx)
+        policy_loss_dict = self.policy.training_step(self, batch, batch_idx)
         self.log("policy_loss", policy_loss_dict["loss"], prog_bar=True)
         return {"loss": value_loss_dict["loss"] + policy_loss_dict["loss"]}
 
     def validation_step(self, batch, batch_idx):
-        value_loss_dict = self.value.validation_step(batch, batch_idx)
+        value_loss_dict = self.value.validation_step(self, batch, batch_idx)
         self.log(
             "value_val_loss", value_loss_dict["val_loss"], prog_bar=True, on_epoch=True
         )
@@ -711,7 +755,7 @@ class StateValueLightning(pl.LightningModule):
             "value_recall", value_loss_dict["recall"], prog_bar=True, on_epoch=True
         )
 
-        policy_loss_dict = self.policy.validation_step(batch, batch_idx)
+        policy_loss_dict = self.policy.validation_step(self, batch, batch_idx)
         self.log(
             "policy_val_loss",
             policy_loss_dict["val_loss"],

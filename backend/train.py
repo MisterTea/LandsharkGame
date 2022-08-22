@@ -1,8 +1,11 @@
 #
+import copy
 import os
 import shutil
 
 import pyximport
+
+from utils.model_serialization import save
 
 pyximport.install(language_level=3)
 #
@@ -21,12 +24,10 @@ def main():
     # policy = train(100, Game(), "LandsharkAi.torch")
     game = Game(4)
 
-    # Train a value model on a random policy
-    NUM_PARALLEL_GAMES = max(1, multiprocessing.cpu_count() - 2)
-
     NUM_TRAIN_BATCHES = 400
-    NUM_VAL_BATCHES = 32
+    NUM_VAL_BATCHES = 16
     NUM_WORKERS = 8
+    GAMES_PER_MINIBATCH = 128
 
     current_value_network = None
     historical_policy_networks = []
@@ -48,14 +49,16 @@ def main():
         train_dataset = GameSimulationDataset(
             "train",
             game,
-            NUM_TRAIN_BATCHES / NUM_WORKERS,
+            NUM_TRAIN_BATCHES // NUM_WORKERS,
+            GAMES_PER_MINIBATCH,
             current_value_network,
             historical_policy_networks,
         )
         val_dataset = GameSimulationDataset(
             "val",
             game,
-            NUM_VAL_BATCHES / NUM_WORKERS,
+            NUM_VAL_BATCHES // NUM_WORKERS,
+            GAMES_PER_MINIBATCH,
             current_value_network,
             historical_policy_networks,
         )
@@ -65,8 +68,16 @@ def main():
         if has_exception():
             break
 
-        current_value_network = lit.value.cpu().eval()
-        historical_policy_networks.append(lit.policy.cpu().eval())
+        current_value_network = save(
+            torch.jit.script(copy.deepcopy(lit.value).cpu().eval())
+        )
+        historical_policy_networks.append(
+            save(torch.jit.script(copy.deepcopy(lit.policy).cpu().eval()))
+        )
+
+        del lit
+        del train_dataset
+        del val_dataset
 
 
 if __name__ == "__main__":

@@ -110,16 +110,18 @@ class Game(GameInterface):
         # Call shuffleNext to ensure the first batch is sorted
         self.shuffleNext()
 
-    def shuffleNext(self):
+    def shuffleNext(self, shuffle_future_cards=False):
         if self.phase == GamePhase.BUYING_HOUSES:
-            np.random.shuffle(self.propertyCardsToDraw[self.onPropertyCard :])
+            if shuffle_future_cards:
+                np.random.shuffle(self.propertyCardsToDraw[self.onPropertyCard :])
             startSort = self.onPropertyCard
             # self.propertyCardsToDraw[startSort : startSort + self.num_players] = sorted(
             #    self.propertyCardsToDraw[startSort : startSort + self.num_players],
             # )
             self.propertyCardsToDraw[startSort : startSort + self.num_players].sort()
         elif self.phase == GamePhase.SELLING_HOUSES:
-            np.random.shuffle(self.dollarCardsToDraw[self.onDollarCard :])
+            if shuffle_future_cards:
+                np.random.shuffle(self.dollarCardsToDraw[self.onDollarCard :])
             startSort = self.onDollarCard
             # self.dollarCardsToDraw[startSort : startSort + self.num_players] = sorted(
             #    self.dollarCardsToDraw[startSort : startSort + self.num_players],
@@ -162,7 +164,7 @@ class Game(GameInterface):
 
     def payoffs(self):
         absolute_payoffs = self.absolute_payoffs()
-        places = torch.sort(absolute_payoffs)[1]
+        places = torch.sort(absolute_payoffs, stable=True)[1]
         payoff = torch.zeros_like(absolute_payoffs)
         if self.num_players == 3:
             scores = torch.tensor([-2.0 / 3.0, -1.0 / 3.0, 3.0 / 3.0])
