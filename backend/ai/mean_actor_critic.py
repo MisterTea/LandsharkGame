@@ -456,8 +456,6 @@ class GameStateTrunk(torch.nn.Module):
 
         self.emb_info: Tuple[List[Tuple[int, int]], ...] = tuple(emb_info)
 
-        self.embedding_range_pairs = tuple(zip(self.embeddings, self.emb_info))
-
         self.dense = torch.nn.Sequential(
             torch.nn.Linear(self.feature_dim, 64),
             torch.nn.LeakyReLU(),
@@ -486,7 +484,7 @@ class GameStateTrunk(torch.nn.Module):
         assert len(embedding_features.shape) == 2
 
         inputs_to_trunk = [self.dense(dense_features)]
-        for (embedding, emb_ranges) in self.embedding_range_pairs:
+        for (embedding, emb_ranges) in zip(self.embeddings, self.emb_info):
             for emb_range in emb_ranges:
                 inputs_to_trunk.append(
                     embedding(embedding_features[:, emb_range[0] : emb_range[1]])
