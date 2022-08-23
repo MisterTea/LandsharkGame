@@ -7,7 +7,7 @@ import threading
 import time
 from collections import Counter
 from threading import Thread
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import cython
 import torch
@@ -73,6 +73,107 @@ def one_step_best_response(
     return best_action
 
 
+def traverse_expected_br(
+    game: GameInterface,
+    player_to_act: int,
+    value_network: StateValueModel,
+    policy_network: ImitationLearningModel,
+    dense_features: torch.Tensor,
+    embedding_features: torch.Tensor,
+    cache: Dict[int, float],
+) -> float:
+    if game.terminal():
+        return float((torch.argmax(game.payoffs()) == player_to_act).item())
+
+    game_hash = hash(game)
+    cache_entry = cache.get(game_hash, None)
+
+    if cache_entry:
+        return cache_entry
+
+    if game.get_player_to_act() == player_to_act:
+        # Use the value network
+        game.populate_features(dense_features, embedding_features)
+        return value_network.get_value_logits(
+            dense_features.unsqueeze(0), embedding_features.unsqueeze(0)
+        )[0][0]
+
+    # Get opponent actions and traverse
+    possible_actions_mask = game.get_one_hot_actions()
+    game.populate_features(dense_features, embedding_features)
+    action_probabilities = policy_network.forward(
+        dense_features=dense_features.unsqueeze(0),
+        embedding_features=embedding_features.unsqueeze(0),
+        possible_action_mask=possible_actions_mask.unsqueeze(0),
+    )
+
+    # Sample top K actions
+    TOP_K_ACTIONS = 2
+    probs, indices = torch.topk(action_probabilities.squeeze(0), TOP_K_ACTIONS)
+
+    # Make probabilities sum to 1
+    probs = torch.nn.functional.normalize(probs, dim=0)
+
+    expected_score = 0.0
+    for a in range(TOP_K_ACTIONS):
+        if probs[a] > 1e-6:
+            g = copy.deepcopy(game)
+            g.act(g.get_player_to_act(), indices[a], skip_forced_actions=False)
+            score = traverse_expected_br(
+                g,
+                player_to_act=player_to_act,
+                value_network=value_network,
+                policy_network=policy_network,
+                dense_features=dense_features,
+                embedding_features=embedding_features,
+                cache=cache,
+            )
+            expected_score += score * probs[a]
+
+    cache[game_hash] = expected_score
+    return expected_score
+
+
+def one_step_best_response_mixed(
+    game: GameInterface,
+    value_network: StateValueModel,
+    policy_network: ImitationLearningModel,
+) -> int:
+    dense_features = torch.zeros((game.feature_dim(),), dtype=torch.float)
+    embedding_features = torch.zeros((game.embedding_dim(),), dtype=torch.int)
+    player_to_act = game.get_player_to_act()
+    actions = game.get_one_hot_actions()
+
+    best_score = -1.0
+    best_action = -1
+    cache = {}
+
+    for i in range(game.action_dim()):
+        if actions[i] == 0:
+            continue
+        action = i
+        g = copy.deepcopy(game)
+        g.act(player_to_act, action)
+
+        # print(f"Starting Action {action}")
+        score = traverse_expected_br(
+            game=g,
+            player_to_act=player_to_act,
+            value_network=value_network,
+            policy_network=policy_network,
+            dense_features=dense_features,
+            embedding_features=embedding_features,
+            cache=cache,
+        )
+        # print(f"Action {action} gives score {score}")
+
+        if best_action == -1 or best_score < score:
+            best_score = score
+            best_action = i
+
+    return best_action
+
+
 # @cython.cfunc
 @torch.no_grad()
 def traverse(
@@ -130,7 +231,7 @@ def traverse(
         # action_taken = int(possible_actions.argmax().item())
     else:
         strategy_without_exploration = None
-        action_taken = one_step_best_response(game, value_network, policy_network)
+        action_taken = one_step_best_response_mixed(game, value_network, policy_network)
 
     game.act(player_to_act, action_taken)
     if has_a_choice:

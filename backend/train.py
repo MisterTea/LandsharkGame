@@ -24,10 +24,10 @@ def main():
     # policy = train(100, Game(), "LandsharkAi.torch")
     game = Game(4)
 
-    NUM_TRAIN_BATCHES = 400
-    NUM_VAL_BATCHES = 16
-    NUM_WORKERS = 8
-    GAMES_PER_MINIBATCH = 128
+    NUM_TRAIN_BATCHES = 800
+    NUM_VAL_BATCHES = 32
+    NUM_WORKERS = 32
+    GAMES_PER_MINIBATCH = 64
 
     current_value_network = None
     historical_policy_networks = []

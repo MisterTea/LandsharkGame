@@ -231,15 +231,12 @@ class ActorCritic(torch.nn.Module):
             # advantage_loss = torch.nn.LeakyReLU()(advantage).sum(dim=1, keepdim=True)
             advantage_loss = advantage_loss.mean()
 
-            entropy = (
-                torch.sum(
-                    -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
-                    dim=1,
-                    keepdim=True,
-                )
-                / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
-                    min=1e-6
-                )
+            entropy = torch.sum(
+                -actor_probs * torch.log(actor_probs.clamp(min=1e-6)),
+                dim=1,
+                keepdim=True,
+            ) / torch.log((actor_probs > 0).sum(dim=1, keepdim=True).float()).clamp(
+                min=1e-6
             )
             assert (
                 (entropy > 1.01).sum() + (entropy < -0.01).sum()
@@ -440,7 +437,6 @@ class GameStateTrunk(torch.nn.Module):
         super().__init__()
         self.feature_dim = game.feature_dim()
         self.num_players = game.num_players
-        self.sigmoid = torch.nn.Sigmoid()
 
         emb = game.embeddings()[1]
         emb_info: List[List[Tuple[int, int]]] = []
@@ -756,7 +752,7 @@ class StateValueLightning(pl.LightningModule):
                 LearningRateMonitor(logging_interval="step"),
                 EarlyStopping(
                     monitor="val_loss",
-                    min_delta=0.001,
+                    min_delta=0.01,
                     mode="min",
                     patience=10,
                     verbose=True,
