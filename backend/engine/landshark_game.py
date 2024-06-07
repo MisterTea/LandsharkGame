@@ -9,9 +9,9 @@ from uuid import UUID, uuid4
 import cython
 import numpy as np
 import torch
-from ai.types import GameEmbedding
 
-from engine.game_interface import GameInterface
+from ai.types import GameEmbedding
+from engine.game_interface import GameInterface, PlayerFeatureIndices
 
 
 class PlayerState:
@@ -29,7 +29,6 @@ class GamePhase(IntEnum):
     BUYING_HOUSES = 1
     SELLING_HOUSES = 2
     GAME_OVER = 3
-
 
 class Game(GameInterface):
     __slots__ = [
@@ -88,12 +87,12 @@ class Game(GameInterface):
         self.playerStates: Tuple[PlayerState] = tuple(playerStates)
 
         # HACK: Reduce rounds to make training faster
-        # self.money = np.array([5] * self.num_players, dtype=np.int)
-        self.money = np.array([18] * self.num_players, dtype=np.int)
-        self.moneyBid = np.zeros((self.num_players,), dtype=np.int)
-        self.canBid = np.zeros((self.num_players,), dtype=np.bool)
+        # self.money = np.array([5] * self.num_players, dtype=np.int32)
+        self.money = np.array([18] * self.num_players, dtype=np.int32)
+        self.moneyBid = np.zeros((self.num_players,), dtype=np.int32)
+        self.canBid = np.zeros((self.num_players,), dtype=bool)
         self.canBid[:] = True
-        self.propertyBid = np.zeros((self.num_players,), dtype=np.int)
+        self.propertyBid = np.zeros((self.num_players,), dtype=np.int32)
 
         self.phase = GamePhase.BUYING_HOUSES
 
@@ -170,6 +169,9 @@ class Game(GameInterface):
 
     def payoffs(self):
         absolute_payoffs = self.absolute_payoffs()
+        return absolute_payoffs
+
+        """
         places = torch.sort(absolute_payoffs, stable=True)[1]
         payoff = torch.zeros_like(absolute_payoffs)
         if self.num_players == 3:
@@ -180,6 +182,7 @@ class Game(GameInterface):
         for index, place in enumerate(places):
             payoff[place] = scores[index]
         return payoff
+        """
 
     def get_one_hot_actions(self, hacks=False):
         player_index = self.get_player_to_act()
@@ -341,6 +344,9 @@ class Game(GameInterface):
 
         player_index = self.get_player_to_act()
         while True:
+            dense_start = dense_cursor
+            embedding_start = embedding_cursor
+
             # print("On Player", player_index)
             player = self.playerStates[player_index]
 
@@ -359,6 +365,10 @@ class Game(GameInterface):
                 dense_features[dense_cursor] = float(sum(player.dollarCards))
 
             dense_cursor += 1
+
+            dense_end = dense_cursor
+            embedding_end = embedding_cursor
+            pfi = PlayerFeatureIndices(dense_start, dense_end, embedding_start, embedding_end)
 
             player_index = (player_index + 1) % self.num_players
             if player_index == self.get_player_to_act():
@@ -576,4 +586,4 @@ class Game(GameInterface):
     def getScore(self, player: int) -> float:
         totalMoney = self.money[player] + sum(self.playerStates[player].dollarCards)
         cashMoney = self.money[player]
-        return totalMoney + cashMoney / 1000.0
+        return totalMoney + cashMoney

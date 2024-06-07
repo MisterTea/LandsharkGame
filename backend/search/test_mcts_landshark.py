@@ -1,12 +1,12 @@
 import random
-import resource
 from typing import Any, List, Tuple
 
 import numpy as np
 import torch
 from torch.multiprocessing import Pool
 
-from engine.landshark_game import GameState
+from ai.mean_actor_critic import ImitationLearningModel
+from engine.landshark_game import Game
 from search.mcts import MCTS
 
 np.random.seed(1)
@@ -104,7 +104,8 @@ class Policy(torch.nn.Module):
 def one_mcts(game, policy):
     np.random.seed(random.SystemRandom().randint(0, 1000000))
     torch.manual_seed(random.SystemRandom().randint(0, 1000000))
-    features = []
+    dense_features = []
+    embedding_features = []
     payoffs = []
     probabilities = []
     mcts = MCTS(policy)
@@ -129,10 +130,11 @@ def one_mcts(game, policy):
                 game.playerAction(game.get_player_to_act(), action)
             else:
                 pi = mcts.getActionProb(game, num_sims=1000, temp=1)
-                game_features = torch.zeros(game.feature_dim())
-                game.populate_features(game_features)
+                dense_features = torch.zeros((game.feature_dim(),), dtype=torch.float)
+                embedding_features = torch.zeros((game.embedding_dim(),), dtype=torch.int)
+                game.populate_features(dense_features, embedding_features)
                 partial_training_examples.append(
-                    [game_features, game.get_player_to_act(), pi, None]
+                    [dense_features, embedding_features, game.get_player_to_act(), pi, None]
                 )
 
                 action = np.random.choice(len(pi), p=pi)
@@ -142,46 +144,53 @@ def one_mcts(game, policy):
                 game_payoffs = game.payoffs()
                 game_payoffs = (game_payoffs == int(game_payoffs.max().item())).long()
                 for pte in partial_training_examples:
-                    features.append(pte[0])
-                    ego_centric_payoffs = torch.roll(game_payoffs, pte[1], dims=[0])
+                    dense_features.append(pte[0])
+                    embedding_features.append(pte[1])
+                    ego_centric_payoffs = torch.roll(game_payoffs, pte[2], dims=[0])
                     winner_index = torch.nonzero(ego_centric_payoffs, as_tuple=False)[0]
                     payoffs.append(winner_index)
-                    probabilities.append(torch.tensor(pte[2]))
+                    probabilities.append(torch.tensor(pte[3]))
                 # print(payoffs)
                 # print(probabilities)
                 break
-    return (features, payoffs, probabilities)
+    return (dense_features, embedding_features, payoffs, probabilities)
 
+def main():
+    game = Game(4)
+    dense_features = []
+    embedding_features = []
+    payoffs = []
+    probabilities = []
+    policy = None
+    step = 128
+    milestone = step
+    for x in range(100):
+        # results: List[Tuple[Any, Any, Any]] = mcts_pool.starmap(
+        #     one_mcts, [(game, policy)] * 64
+        # )
+        results: List[Tuple[Any, Any, Any]] = [one_mcts(game, policy) for _ in range(64)]
 
-game = GameState(4)
-features = []
-payoffs = []
-probabilities = []
-policy = None
-step = 128
-milestone = step
-mcts_pool = Pool(32)
-for x in range(100):
-    results: List[Tuple[Any, Any, Any]] = mcts_pool.starmap(
-        one_mcts, [(game, policy)] * 64
-    )
-    # f, pa, pr = one_mcts(game, policy)
-    for f, pa, pr in results:
-        features.extend(f)
-        payoffs.extend(pa)
-        probabilities.extend(pr)
+        # f, pa, pr = one_mcts(game, policy)
+        for df, ef, pa, pr in results:
+            dense_features.extend(df)
+            embedding_features.extend(ef)
+            payoffs.extend(pa)
+            probabilities.extend(pr)
 
-    while len(features) >= milestone:
-        milestone += step
-        if policy is None:
-            policy = Policy(game.feature_dim(), game.action_dim(), game.num_players)
+        while len(features) >= milestone:
+            milestone += step
+            if policy is None:
+                policy = Policy(game)
+                policy.eval()
+            policy.train()
+            policy.fit(
+                torch.stack(features), torch.stack(payoffs), torch.stack(probabilities)
+            )
+            features.clear()
+            payoffs.clear()
+            probabilities.clear()
             policy.eval()
-        policy.train()
-        policy.fit(
-            torch.stack(features), torch.stack(payoffs), torch.stack(probabilities)
-        )
-        features.clear()
-        payoffs.clear()
-        probabilities.clear()
-        policy.eval()
-        torch.save(policy, "MCTS_AC.torch")
+            torch.save(policy, "MCTS_AC.torch")
+
+if __name__ == '__main__':
+    main()

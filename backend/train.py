@@ -14,7 +14,8 @@ import torch
 from torch import autograd, multiprocessing
 
 from ai.game_simulation_nopool import GameSimulationDataset
-from ai.mean_actor_critic import MeanActorCritic, StateValueLightning, has_exception
+from ai.mean_actor_critic import (MeanActorCritic, StateValueLightning,
+                                  has_exception)
 from engine.landshark_game import Game
 
 
@@ -26,7 +27,7 @@ def main():
 
     NUM_TRAIN_BATCHES = 800
     NUM_VAL_BATCHES = 32
-    NUM_WORKERS = 32
+    NUM_WORKERS = 16
     GAMES_PER_MINIBATCH = 64
 
     current_value_network = None

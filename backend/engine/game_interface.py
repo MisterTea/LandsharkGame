@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 
+from dataclasses import dataclass
 from typing import List
 
 import torch
 
+
+@dataclass
+class PlayerFeatureIndices:
+    dense_start: int
+    dense_end: int
+    embedding_start: int
+    embedding_end: int
 
 class GameInterface:
     @property
@@ -26,6 +34,9 @@ class GameInterface:
         raise NotImplementedError()
 
     def act(self, player: int, action: int):
+        raise NotImplementedError()
+    
+    def get_player_cursors(self) -> List[PlayerFeatureIndices]:
         raise NotImplementedError()
 
     def populate_features(

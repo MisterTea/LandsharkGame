@@ -12,11 +12,11 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch_optimizer
-from engine.game_interface import GameInterface
 from torch import multiprocessing
-from utils.profiler import Profiler
 
 from ai.types import GameEmbedding, GameRollout
+from engine.game_interface import GameInterface
+from utils.profiler import Profiler
 
 
 def masked_softmax(x, mask, temperature):
@@ -380,26 +380,53 @@ class MeanActorCritic(pl.LightningModule):
     def forward(self, inputs):
         self.actor_critics[0].forward(inputs)
 
-    def train_model(self, train_dataset, output_file=None):
-        self.train_dataset = train_dataset
+    def train_model(
+        self, train_dataset, val_dataset, num_workers: int, output_file=None
+    ):
         trainer = pl.Trainer(
-            gpus=1,
+            accelerator="gpu",
+            devices=1,
             # show_progress_bar=False,
             max_epochs=1000,
             # default_save_path=os.path.join(os.getcwd(), "models", "MAC"),
-            val_check_interval=train_dataset.max_games,
-            callbacks=[TorchSaveCallback()],
+            # val_check_interval=train_dataset.max_games,
+            callbacks=[
+                ExitOnExceptionCallback(),
+                TorchSaveCallback(),
+                LearningRateMonitor(logging_interval="step"),
+                EarlyStopping(
+                    monitor="val_loss",
+                    min_delta=0.01,
+                    mode="min",
+                    patience=10,
+                    verbose=True,
+                ),
+            ],
             # auto_lr_find=True,
-            num_sanity_val_steps=0,
+            # num_sanity_val_steps=0,
+            # resume_from_checkpoint="lightning_logs/version_125/"
         )
-        with Profiler(True):
-            trainer.fit(self)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            pin_memory=True,
+            num_workers=num_workers,
+            persistent_workers=True,
+        )
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset,
+            pin_memory=True,
+            num_workers=num_workers,
+            persistent_workers=True,
+        )
+        with Profiler(False):
+            trainer.fit(
+                self, train_dataloaders=train_loader, val_dataloaders=val_loader
+            )
         if output_file is not None:
             trainer.save_checkpoint(output_file)
-        self.train_dataset = None
 
-    def train_dataloader(self):
-        return torch.utils.data.DataLoader(self.train_dataset, pin_memory=True)
+        del train_loader
+        del val_loader
 
     def configure_optimizers(self):
         optimizers = [
@@ -408,27 +435,34 @@ class MeanActorCritic(pl.LightningModule):
         ]
         return optimizers
 
-    def training_step(self, batch, batch_idx, optimizer_idx=0):
-        retval = self.actor_critics[optimizer_idx].training_step(batch, batch_idx)
-        if "progress_bar" in retval:
-            self.log(
-                "critic_loss",
-                retval["progress_bar"]["critic_loss"],
-                prog_bar=True,
-                on_step=True,
-            )
-            self.log(
-                "advantage_loss",
-                retval["progress_bar"]["advantage_loss"],
-                prog_bar=True,
-                on_step=True,
-            )
-            self.log(
-                "entropy_loss",
-                retval["progress_bar"]["entropy_loss"],
-                prog_bar=True,
-                on_step=True,
-            )
+    def training_step(self, batch, batch_idx):
+        assert len(self.actor_critics) == 1
+        retval = None
+        for ac in self.actor_critics:
+            if retval is None:
+                retval = ac.training_step(batch, batch_idx)
+            else:
+                # Doesn't work yet
+                retval += ac.training_step(batch, batch_idx)
+            if "progress_bar" in retval:
+                self.log(
+                    "critic_loss",
+                    retval["progress_bar"]["critic_loss"],
+                    prog_bar=True,
+                    on_step=True,
+                )
+                self.log(
+                    "advantage_loss",
+                    retval["progress_bar"]["advantage_loss"],
+                    prog_bar=True,
+                    on_step=True,
+                )
+                self.log(
+                    "entropy_loss",
+                    retval["progress_bar"]["entropy_loss"],
+                    prog_bar=True,
+                    on_step=True,
+                )
         return retval
 
 
@@ -446,9 +480,12 @@ class GameStateTrunk(torch.nn.Module):
         for k, v in emb.items():
             emb_info.append(v.ranges)
             self.emb_size += 64 * len(v.ranges)
-            self.embeddings.append(
-                torch.nn.EmbeddingBag(v.cardinality, embedding_dim=64, padding_idx=0)
-            )
+            if len(self.embeddings) == 0:
+                self.embeddings.append(
+                    torch.nn.EmbeddingBag(v.cardinality, embedding_dim=64, padding_idx=0)
+                )
+            else:
+                self.embeddings.append(self.embeddings[0])
 
         self.emb_info: Tuple[List[Tuple[int, int]], ...] = tuple(emb_info)
 
@@ -511,6 +548,16 @@ class StateValueModel(torch.nn.Module):
             torch.nn.Identity(),
         )
 
+        self.actor = torch.nn.Sequential(
+            torch.nn.Linear(128, 64),
+            torch.nn.LeakyReLU(),
+            torch.nn.BatchNorm1d(64),
+            torch.nn.Dropout(0.1),
+            #
+            torch.nn.Linear(64, game.action_dim()),
+            torch.nn.Identity(),
+        )
+
     @torch.jit.export
     def get_value_logits(self, dense_features, embedding_features):
         x = self.game_state_trunk(dense_features, embedding_features)
@@ -520,6 +567,7 @@ class StateValueModel(torch.nn.Module):
         return x
 
     def forward(self, dense_features, embedding_features):
+        raise "oops"
         self.sigmoid(self.get_value_logits(dense_features, embedding_features))
 
     def get_action(
@@ -528,17 +576,10 @@ class StateValueModel(torch.nn.Module):
         dense_features: torch.Tensor,
         embedding_features: torch.Tensor,
     ) -> int:
-        player_to_act = game.get_player_to_act()
-        actions = game.getPossibleActions()
-        scores = torch.zeros((len(actions)), dtype=torch.float)
-        for i, action in enumerate(actions):
-            g = copy.deepcopy(game)
-            g.act(player_to_act, action)
-            g.populate_features(dense_features, embedding_features)
-            scores[i] = self.get_value_logits(dense_features, embedding_features)[0][0]
-        # probs = torch.nn.Softmax()(scores)
+        game.populate_features(dense_features, embedding_features)
+        action_scores = game.get_one_hot_actions() * self.actor(self.game_state_trunk(dense_features, embedding_features))
         action_to_play = actions[
-            int(torch.distributions.Categorical(logits=scores).sample().item())
+            int(torch.distributions.Categorical(logits=action_scores).sample().item())
         ]
         return action_to_play
 
@@ -548,15 +589,13 @@ class StateValueModel(torch.nn.Module):
             batch.dense_state_features, batch.embedding_state_features
         )
 
-        player_to_act_wins = (
-            torch.argmax(batch.payoffs, dim=1, keepdim=True) == 0
-        ).float()
-        assert player_to_act_wins.shape == batch.player_to_act.shape
-        # winners = torch.argmax(batch.payoffs, 1, keepdim=True)
-        # loss = torch.nn.CrossEntropyLoss()(state_values, winners)
-        loss = torch.nn.BCEWithLogitsLoss()(state_values, player_to_act_wins)
+        critic_loss = torch.nn.L1Loss()(state_values, batch.payoffs[:,0].unsqueeze(1))
 
-        return state_values, loss
+        action_logits = batch.possible_actions * self.actor(self.game_state_trunk(batch.dense_state_features, batch.embedding_state_features))
+        action_taken = batch.actions.squeeze(dim=1)
+        actor_loss = torch.nn.CrossEntropyLoss()(action_logits, action_taken)
+
+        return state_values, critic_loss + actor_loss
 
     def training_step(
         self, lightning_module, batch_list: List[torch.Tensor], batch_idx
@@ -679,8 +718,7 @@ class ImitationLearningModel(torch.nn.Module):
 
         total_possible = possible_action_mask.float().sum(dim=0, keepdim=False) + 1e-6
 
-        lightning_module.log(
-            "ActionProbs",
+        lightning_module.log_dict(
             dict(
                 [
                     (f"Action_{i}", v.item())

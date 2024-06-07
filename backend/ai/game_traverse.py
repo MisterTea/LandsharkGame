@@ -11,17 +11,14 @@ from typing import Dict, List, Optional
 
 import cython
 import torch
-from engine.game_interface import GameInterface
 from torch.utils.data import IterableDataset
+
+from ai.mean_actor_critic import (ImitationLearningModel, StateValueModel,
+                                  get_action_from_imitator)
+from ai.types import GameRollout
+from engine.game_interface import GameInterface
 from utils.priority import lowpriority
 from utils.profiler import Profiler
-
-from ai.mean_actor_critic import (
-    ImitationLearningModel,
-    StateValueModel,
-    get_action_from_imitator,
-)
-from ai.types import GameRollout
 
 
 def one_step_best_response(
